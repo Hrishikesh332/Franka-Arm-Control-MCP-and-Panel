@@ -1,0 +1,13 @@
+[Unit]
+Description=franka_teach web UI and teach server
+After=franka-teach-rt.service
+
+[Service]
+User=anton
+EnvironmentFile=/etc/default/franka-teach
+ExecStart=/usr/bin/python3 /home/anton/franka_teach/scripts/teach_server.py --port ${UI_PORT}
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

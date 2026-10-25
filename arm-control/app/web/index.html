@@ -1,0 +1,684 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Franka Teach</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --text: #1d2129; --muted: #6b7280; --line: #e3e5e9;
+    --accent: #2563eb; --accent-soft: #dbe6fd; --ok: #15803d; --warn: #b45309; --bad: #b91c1c;
+    --btn: #eef0f3; --btn-hover: #e2e5ea; --map: #fafbfc; --grid: #e9ebef;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111317; --panel: #1a1d23; --text: #e7e9ee; --muted: #9aa1ad; --line: #2b3039;
+      --accent: #3b82f6; --accent-soft: #1e2b45; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171;
+      --btn: #252a32; --btn-hover: #2f3540; --map: #15181d; --grid: #232830;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; background: var(--panel);
+           border-bottom: 1px solid var(--line); padding: 8px 16px;
+           display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  header h1 { font-size: 17px; margin: 0 6px 0 0; }
+  nav { display: flex; gap: 4px; padding: 8px 16px 0; max-width: 1200px; margin: 0 auto; flex-wrap: wrap; }
+  nav button { border-radius: 8px 8px 0 0; border-bottom: none; }
+  nav button.on { background: var(--panel); font-weight: 600; }
+  .pill { padding: 3px 10px; border-radius: 999px; background: var(--btn); font-size: 13px; white-space: nowrap; }
+  .pill.ok { color: var(--ok); } .pill.warn { color: var(--warn); } .pill.bad { color: var(--bad); }
+  .spacer { flex: 1; }
+  main { max-width: 1200px; margin: 0 auto; padding: 0 16px 24px; }
+  .tab { display: none; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); padding-top: 16px; }
+  .tab.on { display: grid; }
+  #tab-operate.on { grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); }
+  @media (max-width: 760px) { #tab-operate.on { grid-template-columns: minmax(0, 1fr); } }
+  .wide { grid-column: 1 / -1; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+  section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 10px; }
+  h3 { font-size: 15px; margin: 4px 0 8px; }
+  button { font: inherit; color: var(--text); background: var(--btn); border: 1px solid var(--line);
+           border-radius: 8px; padding: 7px 12px; cursor: pointer; touch-action: manipulation; }
+  button:hover:not(:disabled) { background: var(--btn-hover); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--accent); color: #fff; border-color: transparent; }
+  button.danger { color: var(--bad); }
+  button.stop { background: var(--bad); color: #fff; border: none; font-weight: 700; padding: 9px 22px; font-size: 16px; }
+  button.on { outline: 2px solid var(--accent); }
+  button.small { padding: 3px 8px; font-size: 13px; }
+  input, select { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line);
+                  border-radius: 8px; padding: 6px 9px; min-width: 0; }
+  input[type=number] { width: 90px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+  .grow { flex: 1; }
+  .muted { color: var(--muted); font-size: 13px; }
+  label { display: inline-flex; gap: 6px; align-items: center; }
+  .pose { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; font-variant-numeric: tabular-nums; }
+  .pose div { background: var(--bg); border-radius: 8px; padding: 5px 8px; }
+  .pose small { color: var(--muted); display: block; font-size: 11px; }
+  .jog { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .jog button { padding: 12px 0; font-weight: 600; user-select: none; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  td { padding: 5px 4px; border-top: 1px solid var(--line); vertical-align: middle; }
+  td.r { text-align: right; white-space: nowrap; }
+  tr.sel td { background: var(--accent-soft); }
+  .num { font-variant-numeric: tabular-nums; }
+  #map { width: 100%; aspect-ratio: 4 / 3; background: var(--map); border: 1px solid var(--line); border-radius: 8px; touch-action: manipulation; }
+  #map text { font-size: 12px; fill: var(--text); }
+  #map .pos { cursor: pointer; }
+  .seqs { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+  .seq { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .recbar { position: sticky; top: 56px; z-index: 4; background: var(--accent-soft); border: 1px solid var(--accent);
+            border-radius: 10px; padding: 10px 14px; margin-top: 12px; }
+  #toast { position: fixed; bottom: 16px; left: 16px; right: 16px; max-width: 560px; margin: 0 auto;
+           background: var(--bad); color: #fff; padding: 10px 14px; border-radius: 8px; display: none; z-index: 10; }
+  .big { font-size: 16px; padding: 10px 16px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Franka Teach</h1>
+  <span id="conn" class="pill">connecting…</span>
+  <button id="fciStart" class="primary" hidden>Unlock &amp; activate FCI</button>
+  <span id="deskMsg" class="pill warn" hidden></span>
+  <span id="rmode" class="pill">robot: –</span>
+  <span id="gchip" class="pill">no gripper</span>
+  <span id="errors" class="pill bad" hidden></span>
+  <button id="recover" hidden>Recover errors</button>
+  <span class="spacer"></span>
+  <button id="modeOff" title="The robot holds its position by itself">Hold</button>
+  <button id="modeGuide" title="Free drive: push the arm by hand, it stays where you let go">Free drive</button>
+  <button id="modeControl" title="The arm is stiff and follows jog / sequence commands">Control</button>
+  <button class="stop" id="stop" title="Stop motion (Esc)">STOP</button>
+</header>
+<nav>
+  <button data-tab="operate" class="on">Operate</button>
+  <button data-tab="grippers">Grippers</button>
+  <button data-tab="positions">Positions</button>
+  <button data-tab="manual">Manual</button>
+</nav>
+<main>
+  <div id="recbar" class="recbar" hidden>
+    <div class="row"><strong id="recTitle"></strong><span class="muted" id="recCount"></span></div>
+    <div class="row">
+      <button id="recWp" class="primary">Add waypoint</button>
+      <button id="recWait">Add 1 s wait</button>
+      <span class="muted">Guarded move</span>
+      <select id="gAxis"><option>-z</option><option>+z</option><option>+x</option><option>-x</option><option>+y</option><option>-y</option></select>
+      <label>max <input id="gDist" type="number" value="30" step="5"> mm</label>
+      <label>until <input id="gForce" type="number" value="5" step="1"> N</label>
+      <button id="recGuarded">Add</button>
+    </div>
+    <div class="row">
+      <span class="muted">Press</span>
+      <label><input id="pForce" type="number" value="10" step="1" min="1" max="50"> N</label>
+      <select id="pContact"><option value="springy">springy</option><option value="hard">hard</option></select>
+      <label>rotate <input id="pRot" type="number" value="0" step="15"> °</label>
+      <label>at <input id="pRotV" type="number" value="30" step="5" min="1" max="90"> °/s</label>
+      <label>hold <input id="pHold" type="number" value="0.5" step="0.5" min="0"> s</label>
+      <label>max depth <input id="pDepth" type="number" value="30" step="5" min="1" max="100"> mm</label>
+      <button id="recPress">Add</button>
+    </div>
+    <div class="row">
+      <button id="recFinish" class="primary">Finish (arm is back above the object)</button>
+      <button id="recCancel" class="danger">Discard</button>
+    </div>
+    <p class="muted" id="recHint"></p>
+  </div>
+
+  <!-- OPERATE -->
+  <div class="tab on" id="tab-operate">
+    <section class="wide">
+      <div class="row">
+        <label>Mounted gripper <select id="activeGripper"></select></label>
+        <span id="holdChip" class="pill"></span>
+        <button id="holdToggle" class="small">set full/empty</button>
+        <span class="spacer"></span>
+        <span class="muted" id="jobStatus"></span>
+      </div>
+    </section>
+    <section>
+      <h2>Desk map</h2>
+      <svg id="map" viewBox="0 0 400 300"></svg>
+      <p class="muted" id="mapHint">Click a position to select it. Coordinates in mm.</p>
+    </section>
+    <section>
+      <h2>Positions</h2>
+      <div class="row" id="selActions">
+        <span class="muted">Select a position on the map or in the list.</span>
+      </div>
+      <table id="opPosTable"></table>
+    </section>
+  </div>
+
+  <!-- GRIPPERS -->
+  <div class="tab" id="tab-grippers">
+    <section class="wide">
+      <h2>Grippers</h2>
+      <div class="row">
+        <select id="editGripper" class="grow"></select>
+        <input id="newGripper" placeholder="new gripper name">
+        <button id="addGripper">Add</button>
+        <button id="delGripper" class="danger">Delete</button>
+      </div>
+      <p class="muted">Each gripper has a <b>pick</b> sequence (starts empty above the part, ends above it holding the part)
+        and a <b>place</b> sequence (starts holding the part above the spot, ends empty above it). Record them with the
+        arm by hand (Guide) or by jogging (Control). Waypoints are stop points; guarded moves move in a direction until
+        the contact force is reached (done live in Control mode).</p>
+      <div class="row" id="loadRow">
+        <span class="muted">Gripper mass</span>
+        <label><input id="gMass" type="number" step="0.05" min="0" max="3"> kg</label>
+        <span class="muted">centre of mass from flange</span>
+        <label>x <input id="gCx" type="number" step="5"></label><label>y <input id="gCy" type="number" step="5"></label>
+        <label>z <input id="gCz" type="number" step="5"> mm</label>
+        <button id="saveLoad">Save</button>
+      </div>
+      <p class="muted">The robot needs the gripper's mass to estimate contact forces correctly (guarded moves, presses,
+        force limit). It is sent when the gripper is selected; Desk's end-effector setting comes on top of it.</p>
+      <div class="seqs" id="seqCards"></div>
+    </section>
+  </div>
+
+  <!-- POSITIONS -->
+  <div class="tab" id="tab-positions">
+    <section>
+      <h2>Teach position</h2>
+      <div class="row"><input id="posName" class="grow" placeholder="position name, e.g. shelf A"></div>
+      <div class="row">
+        <label>Angle
+          <select id="posAngle">
+            <option value="auto">automatic: approach as seen from the robot (recommended)</option>
+            <option value="recorded">as recorded (absolute)</option>
+            <option value="taught">fixed: the gripper angle right now</option>
+          </select>
+        </label>
+      </div>
+      <div class="row"><button id="posHere" class="primary">Save current arm position</button></div>
+      <p class="muted">Move the arm (with any gripper, pointing down) so it is centred above the spot, then save.</p>
+      <h3>Or enter coordinates</h3>
+      <div class="row">
+        <input id="posX" type="number" placeholder="x mm"> <input id="posY" type="number" placeholder="y mm">
+        <input id="posA" type="number" placeholder="angle °">
+        <button id="posManual">Save</button>
+      </div>
+      <p class="muted">In desk coordinates if the desk frame is set, otherwise robot base coordinates. Leave the angle empty for "as recorded".</p>
+    </section>
+    <section>
+      <h2>Saved positions</h2>
+      <table id="posTable"></table>
+    </section>
+    <section>
+      <h2>Desk coordinate system</h2>
+      <p class="muted" id="deskStatus"></p>
+      <div class="row">
+        <button id="deskOrigin">1. Set origin here</button>
+        <button id="deskX">2. Set point on x axis here</button>
+        <button id="deskReset" class="danger">Reset</button>
+      </div>
+      <p class="muted">Move the arm to a desk corner and set it as origin, then to a point at least 5 cm along the edge
+        that should be the x axis. y points to the left of x (seen from above).</p>
+    </section>
+    <section>
+      <h2>Robot access (Desk)</h2>
+      <div class="row">
+        <button id="fciStart2" class="primary">Unlock &amp; activate FCI</button>
+        <button id="fciStop">Deactivate FCI &amp; lock brakes</button>
+      </div>
+      <p class="muted">"Deactivate" hands the robot back for normal Desk use (e.g. for colleagues). If someone else
+        has control in Desk, you are asked to confirm with the circle button on the robot's Pilot.</p>
+      <div class="row">
+        <input id="deskUser" placeholder="Desk user" style="width:140px">
+        <input id="deskPass" type="password" placeholder="Desk password" style="width:160px">
+        <button id="saveDeskLogin">Save login</button>
+      </div>
+      <p class="muted">Stored only on the Pi (readable by the app only). Needed once.</p>
+    </section>
+    <section>
+      <h2>Settings</h2>
+      <div class="row"><label>Safe travel height <input id="setZ" type="number" step="10"> mm</label></div>
+      <div class="row"><label>Travel speed <input id="setV" type="number" step="5" min="5" max="100"> %</label></div>
+      <div class="row"><label>Force limit <input id="setF" type="number" step="1"> N</label></div>
+      <div class="row"><button id="saveSettings">Save settings</button></div>
+      <p class="muted">Sequences abort when the measured external force exceeds the limit. The robot's own collision
+        reflex triggers at 30–40 N.</p>
+    </section>
+  </div>
+
+  <!-- MANUAL -->
+  <div class="tab" id="tab-manual">
+    <section>
+      <h2>Current pose (robot base)</h2>
+      <div class="pose">
+        <div><small>x mm</small><span id="px">–</span></div>
+        <div><small>y mm</small><span id="py">–</span></div>
+        <div><small>z mm</small><span id="pz">–</span></div>
+        <div><small>yaw °</small><span id="pw">–</span></div>
+      </div>
+      <p id="forceRead"></p>
+      <p class="muted" id="modeHint"></p>
+      <div class="row">
+        <label class="grow">Jog speed <input id="speed" type="range" min="5" max="100" step="5" value="30" class="grow"></label>
+        <span id="speedVal">30 %</span>
+      </div>
+    </section>
+    <section>
+      <h2>Jog (control mode)</h2>
+      <div class="row">
+        <label>Step
+          <select id="step">
+            <option value="1">1 mm / 1°</option>
+            <option value="5" selected>5 mm / 2°</option>
+            <option value="10">10 mm / 5°</option>
+            <option value="50">50 mm / 15°</option>
+            <option value="hold">hold to move</option>
+          </select>
+        </label>
+      </div>
+      <div class="jog" id="jog">
+        <button data-axis="x" data-dir="1">+X</button><button data-axis="y" data-dir="1">+Y</button>
+        <button data-axis="z" data-dir="1">+Z</button><button data-axis="rz" data-dir="1">+Rz</button>
+        <button data-axis="x" data-dir="-1">−X</button><button data-axis="y" data-dir="-1">−Y</button>
+        <button data-axis="z" data-dir="-1">−Z</button><button data-axis="rz" data-dir="-1">−Rz</button>
+        <button data-axis="rx" data-dir="1">+Rx</button><button data-axis="ry" data-dir="1">+Ry</button>
+        <button data-axis="rx" data-dir="-1">−Rx</button><button data-axis="ry" data-dir="-1">−Ry</button>
+      </div>
+      <p class="muted">Jog axes are robot base axes. Rotations turn about the base axes through the flange.</p>
+    </section>
+  </div>
+</main>
+<div id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const mm = (v) => (v * 1000).toFixed(0);
+let state = null, grippers = [], positions = {}, desk = null, deskPts = {}, settings = {}, selected = null;
+let mapView = null, gotoPoint = null;  // map transform of the last drawing, clicked point (desk m)
+const openEditors = new Set();
+
+function toast(msg) {
+  const t = $('toast'); t.textContent = msg; t.style.display = 'block';
+  clearTimeout(toast.h); toast.h = setTimeout(() => t.style.display = 'none', 6000);
+}
+
+async function api(path, body, method) {
+  const opts = { method: method || (body === undefined ? 'GET' : 'POST'), headers: {} };
+  if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+  const r = await fetch(path, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok || data.ok === false) { toast(data.error || r.statusText); throw new Error(data.error); }
+  return data;
+}
+const enc = encodeURIComponent;
+
+// ---------------------------------------------------------------- desk transforms (match teach_core)
+function rot2(v, a) { const c = Math.cos(a), s = Math.sin(a); return [c * v[0] - s * v[1], s * v[0] + c * v[1]]; }
+function toDesk(xy) { if (!desk) return xy; return rot2([xy[0] - desk.origin[0], xy[1] - desk.origin[1]], -desk.angle); }
+function yawDesk(yaw) { return desk ? yaw - desk.angle : yaw; }
+
+// ---------------------------------------------------------------- tabs
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x === b));
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.id === 'tab-' + b.dataset.tab));
+});
+
+// ---------------------------------------------------------------- rendering
+function renderState() {
+  const s = state, conn = $('conn');
+  if (!s) { conn.textContent = 'server offline'; conn.className = 'pill bad'; return; }
+  const fresh = s.connected && s.pose && s.pose_age < 1.0;
+  conn.textContent = fresh ? 'robot connected' : 'robot not connected: ' + (s.connection_problem || 'no data');
+  conn.className = 'pill ' + (fresh ? 'ok' : 'bad');
+  const fciProblem = !s.connected;
+  $('fciStart').hidden = !fciProblem || (s.desk && s.desk.running);
+  $('deskMsg').hidden = !(s.desk && s.desk.message);
+  if (s.desk) $('deskMsg').textContent = s.desk.message;
+  $('rmode').textContent = 'robot: ' + s.robot_mode
+    + (s.robot_mode === 'move' && s.success_rate !== null ? ` · link ${(s.success_rate * 100).toFixed(0)} %` : '');
+  $('rmode').className = 'pill ' + (['reflex', 'user stopped'].includes(s.robot_mode) ? 'bad' : '');
+  const errs = s.errors || [];
+  const shown = errs.length ? errs.join(', ') : (s.last_error ? 'last stop: ' + s.last_error.replace(/^libfranka: /, '') : '');
+  $('errors').hidden = !shown; $('errors').textContent = shown;
+  $('recover').hidden = !(errs.length || s.robot_mode === 'reflex');
+  if (document.activeElement !== $('activeGripper')) $('activeGripper').value = s.gripper || '';
+  $('gchip').textContent = s.gripper ? `${s.gripper} · ${s.holding ? 'full' : 'empty'}` : 'no gripper selected';
+  $('gchip').className = 'pill ' + (s.gripper ? '' : 'warn');
+  $('holdChip').textContent = s.holding ? 'holding a part' : 'empty';
+  $('holdChip').className = 'pill ' + (s.holding ? 'warn' : 'ok');
+  if (s.pose) {
+    $('px').textContent = mm(s.pose.p[0]); $('py').textContent = mm(s.pose.p[1]);
+    $('pz').textContent = mm(s.pose.p[2]); $('pw').textContent = (s.pose.yaw * 180 / Math.PI).toFixed(1);
+  }
+  $('forceRead').textContent = `external force ${s.force.toFixed(1)} N · z ${s.force_z.toFixed(1)} N`
+    + (s.press_force !== null ? ` · pressing ${s.press_force.toFixed(1)} N` : '');
+  const control = s.mode === 'control';
+  $('modeControl').classList.toggle('on', control);
+  $('modeGuide').classList.toggle('on', s.mode === 'guide');
+  $('modeOff').classList.toggle('on', s.mode === 'off');
+  $('modeHint').textContent = {
+    control: 'Control: the arm is stiff and follows jog / sequence commands. Do not push it by hand.',
+    guide: 'Free drive: push the arm by hand, it stays where you let go. Needs the gripper mass set, otherwise it slowly sinks.',
+    off: 'Hold: the robot holds its position by itself. Choose Free drive to move it by hand or Control to jog.',
+  }[s.mode] || '';
+  const autoBtn = document.querySelector('[data-act=auto]');
+  if (autoBtn) autoBtn.textContent = s.holding ? 'Place here' : 'Pick here';
+  const busy = s.job.running;
+  document.querySelectorAll('#jog button').forEach(b => b.disabled = !control || busy);
+  $('jobStatus').textContent = s.job.label ? `${s.job.label}: ${s.job.message}` : '';
+  document.querySelectorAll('[data-needs-idle]').forEach(b => b.disabled = busy || !!s.recording);
+  const rec = s.recording;
+  $('recbar').hidden = !rec;
+  if (rec) {
+    $('recTitle').textContent = `Recording ${rec.kind} sequence of "${rec.gripper}"`;
+    $('recCount').textContent = `${rec.steps} steps${rec.continuous ? ' · continuous' : ''}`;
+    $('recHint').textContent = control
+      ? 'Control mode: jog between waypoints; guarded moves and presses run immediately. Start a press a few cm above the contact.'
+      : 'Free drive: move the arm by hand and add waypoints; guarded moves and presses are only recorded (they run on replay).';
+  }
+  if (document.activeElement !== $('speed')) {
+    $('speed').value = Math.round(s.speed * 100); $('speedVal').textContent = Math.round(s.speed * 100) + ' %';
+  }
+  drawMap();
+}
+
+function drawMap() {
+  const svg = $('map'), W = 400, H = 300;
+  const pts = Object.entries(positions).map(([n, p]) => ({ n, d: p.desk_xy, yaw: p.yaw }));
+  const base = toDesk([0, 0]);
+  const cur = state && state.pose ? toDesk(state.pose.p) : null;
+  const all = pts.map(p => p.d).concat([base]).concat(cur ? [cur] : []);
+  let x0 = Math.min(...all.map(p => p[0])), x1 = Math.max(...all.map(p => p[0]));
+  let y0 = Math.min(...all.map(p => p[1])), y1 = Math.max(...all.map(p => p[1]));
+  const span = Math.max(0.6, x1 - x0, (y1 - y0) * W / H) * 1.25;
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, k = W / span;
+  const X = (x) => W / 2 + (x - cx) * k, Y = (y) => H / 2 - (y - cy) * k;
+  mapView = { cx, cy, k, W, H };
+  let g = '';
+  const stepM = span > 2 ? 0.5 : span > 1 ? 0.2 : 0.1;
+  for (let v = Math.floor((cx - span / 2) / stepM) * stepM; v < cx + span / 2; v += stepM)
+    g += `<line x1="${X(v)}" y1="0" x2="${X(v)}" y2="${H}" stroke="var(--grid)"/>`;
+  for (let v = Math.floor((cy - span) / stepM) * stepM; v < cy + span; v += stepM)
+    g += `<line x1="0" y1="${Y(v)}" x2="${W}" y2="${Y(v)}" stroke="var(--grid)"/>`;
+  if (desk) g += `<path d="M${X(0)},${Y(0)} h40 M${X(0)},${Y(0)} v-40" stroke="var(--muted)" stroke-width="2" fill="none"/>
+      <text x="${X(0) + 42}" y="${Y(0) + 4}" class="muted">x</text><text x="${X(0) - 3}" y="${Y(0) - 44}">y</text>`;
+  g += `<circle cx="${X(base[0])}" cy="${Y(base[1])}" r="${Math.max(6, 0.08 * k)}" fill="none" stroke="var(--muted)" stroke-dasharray="3 3"/>
+        <text x="${X(base[0]) + 10}" y="${Y(base[1]) + 4}" fill="var(--muted)">robot</text>`;
+  for (const p of pts) {
+    const sel = p.n === selected, x = X(p.d[0]), y = Y(p.d[1]);
+    let arrow = '';
+    if (p.yaw !== null && p.yaw !== undefined) {
+      const a = yawDesk(p.yaw);
+      arrow = `<line x1="${x}" y1="${y}" x2="${x + 16 * Math.cos(a)}" y2="${y - 16 * Math.sin(a)}" stroke="var(--accent)" stroke-width="2"/>`;
+    }
+    g += `<g class="pos" data-pos="${esc(p.n)}"><circle cx="${x}" cy="${y}" r="${sel ? 10 : 8}" fill="${sel ? 'var(--accent)' : 'var(--accent-soft)'}" stroke="var(--accent)" stroke-width="2"/>
+          ${arrow}<text x="${x + 12}" y="${y - 10}">${esc(p.n)}</text></g>`;
+  }
+  if (gotoPoint) g += `<circle cx="${X(gotoPoint[0])}" cy="${Y(gotoPoint[1])}" r="6" fill="none" stroke="var(--warn)" stroke-width="2" stroke-dasharray="3 2"/>`;
+  if (cur) g += `<path d="M${X(cur[0]) - 7},${Y(cur[1])} h14 M${X(cur[0])},${Y(cur[1]) - 7} v14" stroke="var(--bad)" stroke-width="2"/>`;
+  svg.innerHTML = g;
+  $('mapHint').textContent = (desk ? 'Desk coordinates' : 'Robot base coordinates (no desk frame set)')
+    + ' · red cross = gripper · click a position to select it, or an empty spot to drive there';
+}
+
+function posRow(n, p, ops) {
+  const d = p.desk_xy, ang = p.angle === 'taught' ? ` · ${(yawDesk(p.yaw) * 180 / Math.PI).toFixed(0)}°`
+    : p.angle === 'recorded' ? ' · as recorded' : ' · auto angle';
+  return `<tr class="${n === selected ? 'sel' : ''}" data-select="${esc(n)}"><td>${esc(n)}</td>
+    <td class="muted num">${mm(d[0])}, ${mm(d[1])}${ang}</td><td class="r">${ops}</td></tr>`;
+}
+
+function renderPositions() {
+  const names = Object.keys(positions);
+  $('opPosTable').innerHTML = names.length ? names.map(n => posRow(n, positions[n], '')).join('')
+    : '<tr><td class="muted">No positions yet — teach them in the Positions tab.</td></tr>';
+  $('posTable').innerHTML = names.length ? names.map(n => posRow(n, positions[n],
+    `<button class="small danger" data-delpos="${esc(n)}">Delete</button>`)).join('')
+    : '<tr><td class="muted">No positions yet.</td></tr>';
+  const sa = $('selActions');
+  if (gotoPoint) {
+    sa.innerHTML = `<strong>${mm(gotoPoint[0])}, ${mm(gotoPoint[1])} mm</strong>
+      <button class="primary big" data-needs-idle data-goto>Go here</button>
+      <span class="muted">at the current height, via the safe travel height</span>`;
+  } else if (selected && positions[selected]) {
+    const holding = state && state.holding;
+    sa.innerHTML = `<strong>${esc(selected)}</strong>
+      <button class="primary big" data-needs-idle data-act="auto">${holding ? 'Place here' : 'Pick here'}</button>
+      <button data-needs-idle data-act="goto">Go above</button>`;
+  } else {
+    sa.innerHTML = '<span class="muted">Select a position on the map or in the list.</span>';
+  }
+  drawMap();
+}
+
+function stepText(s, i) {
+  if (s.type === 'pose') return `${i === 0 ? 'start ' : ''}${s.blend ? 'pass' : 'stop'} at <span class="num">${mm(s.p[0])}, ${mm(s.p[1])}, z ${mm(s.p[2])}</span>`;
+  if (s.type === 'wait') return `wait ${s.s} s`;
+  if (s.type === 'press') return `press ${s.force} N (${s.contact})${s.rotate_deg ? `, rotate ${s.rotate_deg}° at ${s.rot_speed_deg}°/s` : ''}${s.hold_s ? `, hold ${s.hold_s} s` : ''}, max depth ${mm(s.max_depth)} mm`;
+  if (s.type === 'guarded') return `guarded move (${s.dir.map(v => v.toFixed(1)).join(', ')}) up to ${mm(s.dist)} mm until ${s.force} N`;
+  return s.type;
+}
+
+async function renderGrippers() {
+  grippers = await (await fetch('/api/grippers')).json();
+  const active = state ? state.gripper : null;
+  const opts = grippers.map(g => `<option ${g.name === active ? 'selected' : ''}>${esc(g.name)}</option>`).join('');
+  if (document.activeElement !== $('activeGripper'))
+    $('activeGripper').innerHTML = `<option value="">— none —</option>` + opts;
+  const ed = $('editGripper'), prev = ed.value;
+  ed.innerHTML = grippers.length ? grippers.map(g => `<option>${esc(g.name)}</option>`).join('') : '<option value="">no grippers yet</option>';
+  if (grippers.some(g => g.name === prev)) ed.value = prev; else if (active) ed.value = active;
+  await renderSeqCards();
+}
+
+async function renderSeqCards() {
+  const name = $('editGripper').value;
+  if (!name) { $('seqCards').innerHTML = '<p class="muted">Add a gripper to start.</p>'; return; }
+  const g = await (await fetch('/api/grippers/' + enc(name))).json();
+  const com = g.com || [0, 0, 0];
+  $('gMass').value = g.mass || 0;
+  [$('gCx').value, $('gCy').value, $('gCz').value] = com.map(v => Math.round(v * 1000));
+  let html = '';
+  for (const kind of ['pick', 'place']) {
+    const s = g.sequences[kind], key = name + '/' + kind;
+    html += `<div class="seq"><h3>${kind === 'pick' ? 'Pick (aufnehmen)' : 'Place (ablegen)'}</h3>`;
+    if (s) {
+      html += `<p class="muted">${s.steps.length} steps · recorded ${esc(s.recorded)} · start at
+        ${mm(s.recorded_xy[0])}, ${mm(s.recorded_xy[1])} (base)</p>
+        <div class="row"><label>Speed <input type="number" min="1" max="100" step="5" value="${Math.round((s.speed || 0.2) * 100)}"
+          data-seqspeed="${kind}"> %</label>
+        <button class="small" data-needs-idle data-test="${kind}">Test where recorded</button>
+        <button class="small" data-toggle-ed="${kind}">${openEditors.has(key) ? 'Hide steps' : 'Edit steps'}</button></div>`;
+      if (openEditors.has(key)) {
+        html += '<table>' + s.steps.map((st, i) => `<tr><td class="num muted">${i + 1}</td><td>${stepText(st, i)}</td><td class="r">
+          ${st.type === 'pose' ? `<button class="small" data-ed="toggle_blend" data-k="${kind}" data-i="${i}" title="stop / pass through">⇄</button>` : ''}
+          ${st.type === 'wait' ? `<button class="small" data-ed="set_wait" data-k="${kind}" data-i="${i}">edit</button>` : ''}
+          ${st.type === 'guarded' ? `<button class="small" data-ed="set_guarded" data-k="${kind}" data-i="${i}">edit</button>` : ''}
+          ${st.type === 'press' ? `<button class="small" data-ed="set_press" data-k="${kind}" data-i="${i}">edit</button>` : ''}
+          <button class="small" data-ed="up" data-k="${kind}" data-i="${i}">↑</button>
+          <button class="small" data-ed="down" data-k="${kind}" data-i="${i}">↓</button>
+          <button class="small" data-ed="insert_wait" data-k="${kind}" data-i="${i}" title="insert 1 s wait after">+wait</button>
+          <button class="small" data-ed="insert_guarded" data-k="${kind}" data-i="${i}" title="insert guarded move after">+guard</button>
+          <button class="small" data-ed="insert_press" data-k="${kind}" data-i="${i}" title="insert press after">+press</button>
+          <button class="small danger" data-ed="delete" data-k="${kind}" data-i="${i}">✕</button></td></tr>`).join('') + '</table>';
+      }
+    } else {
+      html += '<p class="muted">Not recorded yet.</p>';
+    }
+    html += `<div class="row">
+      <button data-needs-idle data-rec="${kind}" class="primary">${s ? 'Re-record' : 'Record'}</button>
+      <label><input type="checkbox" data-cont="${kind}"> continuous path</label>
+      ${s ? `<button class="small danger" data-ed="clear" data-k="${kind}" data-i="0">Delete sequence</button>` : ''}
+    </div>
+    <p class="muted">${kind === 'pick'
+      ? 'Before starting: gripper empty, arm above the part. Finish when back above it, holding the part.'
+      : 'Before starting: holding the part, arm above the spot. Finish when back above it, empty.'}</p></div>`;
+  }
+  $('seqCards').innerHTML = html;
+  renderState();
+}
+
+async function loadAll() {
+  positions = await (await fetch('/api/positions')).json();
+  const d = await (await fetch('/api/desk')).json();
+  desk = d.desk; deskPts = d.points || {};
+  settings = await (await fetch('/api/settings')).json();
+  if (selected && !positions[selected]) selected = null;
+  $('deskStatus').textContent = desk
+    ? `Desk frame set (x axis at ${(desk.angle * 180 / Math.PI).toFixed(1)}° in the robot base frame).`
+    : `Not set — coordinates are in the robot base frame.${deskPts.origin ? ' Origin taught, x-axis point missing.' : ''}`;
+  for (const [id, key, f] of [['setZ', 'safe_z', 1000], ['setV', 'transit_speed', 100], ['setF', 'max_force', 1]])
+    if (document.activeElement !== $(id)) $(id).value = Math.round(settings[key] * f);
+  renderPositions();
+}
+
+async function poll() {
+  try { state = await (await fetch('/api/state')).json(); } catch { state = null; }
+  renderState();
+  setTimeout(poll, 250);
+}
+
+// ---------------------------------------------------------------- actions
+$('modeOff').onclick = () => api('/api/mode', { mode: 'off' });
+$('fciStart').onclick = $('fciStart2').onclick = () => api('/api/robot/start', {});
+$('fciStop').onclick = () => { if (confirm('Deactivate FCI and lock the brakes?')) api('/api/robot/stop', {}); };
+$('saveDeskLogin').onclick = async () => {
+  await api('/api/desk_login', { user: $('deskUser').value.trim(), password: $('deskPass').value });
+  $('deskPass').value = ''; toast('Desk login saved');
+};
+$('modeGuide').onclick = () => api('/api/mode', { mode: 'guide' });
+$('modeControl').onclick = () => api('/api/mode', { mode: 'control' });
+$('stop').onclick = () => api('/api/stop', {});
+$('recover').onclick = () => api('/api/recover', {});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') api('/api/stop', {}); });
+$('speed').oninput = () => $('speedVal').textContent = $('speed').value + ' %';
+$('speed').onchange = () => api('/api/speed', { speed: $('speed').value / 100 });
+
+$('activeGripper').onchange = async () => { await api('/api/active', { gripper: $('activeGripper').value }); renderGrippers(); };
+$('holdToggle').onclick = () => {
+  const now = state && state.holding;
+  if (confirm(`Mark the gripper as ${now ? 'EMPTY' : 'HOLDING A PART'}?`)) api('/api/active', { holding: !now });
+};
+
+// map / list selection and position actions
+document.addEventListener('click', async (e) => {
+  if (e.target.closest('[data-goto]')) {
+    await api('/api/goto', { desk_xy: gotoPoint.map(v => v * 1000) });
+    return;
+  }
+  const svg = e.target.closest('#map');
+  if (svg && !e.target.closest('[data-pos]') && mapView) {
+    const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
+    const sp = pt.matrixTransform(svg.getScreenCTM().inverse());
+    gotoPoint = [mapView.cx + (sp.x - mapView.W / 2) / mapView.k, mapView.cy - (sp.y - mapView.H / 2) / mapView.k];
+    selected = null; renderPositions(); renderState();
+    return;
+  }
+  const t = e.target.closest('[data-pos],[data-select],[data-act],[data-delpos],[data-test],[data-rec],[data-ed],[data-toggle-ed]');
+  if (!t) return;
+  const d = t.dataset, gname = $('editGripper').value;
+  if (d.pos !== undefined || d.select !== undefined) { selected = d.pos ?? d.select; gotoPoint = null; renderPositions(); renderState(); }
+  else if (d.act) await api(`/api/positions/${enc(selected)}/${d.act}`, {});
+  else if (d.delpos && confirm(`Delete position "${d.delpos}"?`)) { await api('/api/positions/' + enc(d.delpos), undefined, 'DELETE'); loadAll(); }
+  else if (d.test) await api(`/api/grippers/${enc(gname)}/${d.test}/test`, {});
+  else if (d.rec) {
+    const cont = document.querySelector(`[data-cont="${d.rec}"]`).checked;
+    const sp = document.querySelector(`[data-seqspeed="${d.rec}"]`);
+    await api('/api/record/start', { gripper: gname, kind: d.rec, continuous: cont, speed: sp ? sp.value / 100 : 0.2 });
+  } else if (d.toggleEd) {
+    const key = gname + '/' + d.toggleEd; openEditors.has(key) ? openEditors.delete(key) : openEditors.add(key); renderSeqCards();
+  } else if (d.ed) {
+    const body = { op: d.ed, index: Number(d.i) };
+    if (d.ed === 'clear' && !confirm(`Delete the ${d.k} sequence?`)) return;
+    if (d.ed === 'set_wait') { const v = prompt('Wait time in seconds', '1'); if (v === null) return; body.op = 'set'; body.s = Number(v); }
+    if (d.ed === 'insert_guarded' || d.ed === 'set_guarded') {
+      const v = prompt('Guarded move: axis (+x -x +y -y +z -z in base frame), max distance mm, force N, speed %', '-z 30 5 5');
+      if (v === null) return;
+      const [axis, dist, force, speed] = v.trim().split(/\s+/);
+      Object.assign(body, { axis, dist: Number(dist) / 1000, force: Number(force), speed: Number(speed) / 100 });
+      if (d.ed === 'set_guarded') body.op = 'set';
+    }
+    if (d.ed === 'insert_press' || d.ed === 'set_press') {
+      const v = prompt('Press: force N, springy|hard, rotate °, rotation speed °/s, hold s, max depth mm', '10 springy 0 30 0.5 30');
+      if (v === null) return;
+      const [force, contact, rot, rotv, hold, depth] = v.trim().split(/\s+/);
+      Object.assign(body, { force: Number(force), contact, rotate_deg: Number(rot), rot_speed_deg: Number(rotv),
+                            hold_s: Number(hold), max_depth: Number(depth) / 1000 });
+      if (d.ed === 'set_press') body.op = 'set';
+    }
+    await api(`/api/grippers/${enc(gname)}/${d.k}/edit`, body); renderSeqCards();
+  }
+});
+document.addEventListener('change', async (e) => {
+  const k = e.target.dataset.seqspeed;
+  if (k) await api(`/api/grippers/${enc($('editGripper').value)}/${k}/edit`, { op: 'speed', speed: e.target.value / 100 });
+});
+
+// recording bar
+$('recWp').onclick = () => api('/api/record/waypoint', {});
+$('recWait').onclick = () => api('/api/record/wait', { s: 1.0 });
+$('recGuarded').onclick = () => api('/api/record/guarded', { axis: $('gAxis').value, dist: $('gDist').value / 1000,
+                                                              force: Number($('gForce').value), speed: 0.05 });
+$('recPress').onclick = () => api('/api/record/press', {
+  force: Number($('pForce').value), contact: $('pContact').value, rotate_deg: Number($('pRot').value),
+  rot_speed_deg: Number($('pRotV').value), hold_s: Number($('pHold').value), max_depth: $('pDepth').value / 1000 });
+$('recFinish').onclick = async () => { await api('/api/record/finish', {}); renderGrippers(); };
+$('recCancel').onclick = () => { if (confirm('Discard this recording?')) api('/api/record/cancel', {}); };
+
+// grippers
+$('editGripper').onchange = renderSeqCards;
+$('addGripper').onclick = async () => {
+  const n = $('newGripper').value.trim(); if (!n) return toast('Enter a gripper name.');
+  await api('/api/grippers', { name: n }); $('newGripper').value = ''; await renderGrippers();
+  $('editGripper').value = n; renderSeqCards();
+};
+$('saveLoad').onclick = () => api(`/api/grippers/${enc($('editGripper').value)}/load`, {
+  mass: Number($('gMass').value), com_mm: [Number($('gCx').value), Number($('gCy').value), Number($('gCz').value)] });
+$('delGripper').onclick = async () => {
+  const n = $('editGripper').value;
+  if (n && confirm(`Delete gripper "${n}" and its sequences?`)) { await api('/api/grippers/' + enc(n), undefined, 'DELETE'); renderGrippers(); }
+};
+
+// positions, desk, settings
+$('posHere').onclick = async () => {
+  const n = $('posName').value.trim(); if (!n) return toast('Enter a position name.');
+  await api('/api/positions', { name: n, angle: $('posAngle').value }); $('posName').value = ''; loadAll();
+};
+$('posManual').onclick = async () => {
+  const n = $('posName').value.trim(); if (!n) return toast('Enter a position name.');
+  const a = $('posA').value;
+  // the angle is entered in desk coordinates; the server stores base-frame yaw
+  const yawDeg = a === '' ? null : Number(a) + (desk ? desk.angle * 180 / Math.PI : 0);
+  await api('/api/positions', { name: n, desk_xy: [Number($('posX').value), Number($('posY').value)], yaw_deg: yawDeg });
+  $('posName').value = ''; loadAll();
+};
+$('deskOrigin').onclick = async () => { await api('/api/desk/origin', {}); loadAll(); };
+$('deskX').onclick = async () => { await api('/api/desk/xaxis', {}); loadAll(); };
+$('deskReset').onclick = async () => { if (confirm('Reset the desk frame?')) { await api('/api/desk', undefined, 'DELETE'); loadAll(); } };
+$('saveSettings').onclick = async () => {
+  await api('/api/settings', { safe_z: $('setZ').value / 1000, transit_speed: $('setV').value / 100, max_force: Number($('setF').value) });
+  loadAll();
+};
+
+// jog
+const ROT_STEP = { 1: 1, 5: 2, 10: 5, 50: 15 };
+document.querySelectorAll('#jog button').forEach(b => {
+  const axis = b.dataset.axis, dir = Number(b.dataset.dir), rot = axis.startsWith('r');
+  let timer = null;
+  const send = (mmv, deg) => api('/api/jog', { axis, delta: dir * (rot ? deg * Math.PI / 180 : mmv / 1000) }).catch(() => {});
+  b.addEventListener('pointerdown', (e) => {
+    if ($('step').value !== 'hold') return;
+    e.preventDefault(); b.setPointerCapture(e.pointerId);
+    send(4, 2); timer = setInterval(() => send(4, 2), 100);
+  });
+  const release = () => { if (timer) { clearInterval(timer); timer = null; api('/api/stop', {}).catch(() => {}); } };
+  b.addEventListener('pointerup', release); b.addEventListener('pointercancel', release);
+  b.addEventListener('click', () => { const v = $('step').value; if (v !== 'hold') send(Number(v), ROT_STEP[v]); });
+});
+
+poll(); loadAll(); renderGrippers();
+setInterval(loadAll, 3000);
+</script>
+</body>
+</html>

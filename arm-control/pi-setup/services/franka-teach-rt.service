@@ -1,0 +1,18 @@
+[Unit]
+Description=franka_teach realtime robot process (libfranka)
+After=network-online.target franka-rt-irq.service
+Wants=network-online.target
+
+[Service]
+User=anton
+EnvironmentFile=/etc/default/franka-teach
+# libfranka's dependencies (pinocchio, urdfdom) come with the ROS installation
+Environment=LD_LIBRARY_PATH=/opt/ros/jazzy/lib/aarch64-linux-gnu:/opt/ros/jazzy/lib
+ExecStart=/home/anton/franka_teach/bin/franka_teach_rt ${ROBOT_IP}
+LimitRTPRIO=99
+LimitMEMLOCK=infinity
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

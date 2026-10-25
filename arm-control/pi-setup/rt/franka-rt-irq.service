@@ -1,0 +1,11 @@
+[Unit]
+Description=Raise Ethernet IRQ thread priority for the Franka control loop
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/franka-rt-irq.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

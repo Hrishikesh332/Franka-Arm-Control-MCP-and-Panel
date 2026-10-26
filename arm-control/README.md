@@ -1,8 +1,8 @@
 # arm-control
 
 > ### ▶ Open the UI: **[http://10.23.60.102:8080](http://10.23.60.102:8080)**
-> Laptop on the WiFi `3-UTUM-IOT`. The Pi gets its address by DHCP, so it can change — if the link
-> does not load, see [finding the IP](#connecting-to-the-pi).
+> Laptop on the WiFi `3-UTUM-IOT`. The Pi asks the DHCP server for this address at every boot, so
+> the link stays the same; if it ever does not load, see [finding the IP](#connecting-to-the-pi).
 
 **Teach-and-repeat for a Franka Research 3 with exchangeable passive grippers — run from a
 Raspberry Pi 4, operated from a web page.**
@@ -20,15 +20,15 @@ everywhere on the desk.
 
 | | |
 |---|---|
-| Hostname | `6B-PI4` (mDNS / `.local` does not work on the venue WiFi — use the IP) |
+| Hostname | `6B-PI4` — not usable as a URL here: the WiFi has no local DNS (it hands out 8.8.8.8) and blocks mDNS / `.local` |
 | User / password | `anton` / `1234` (also the `sudo` password) |
 | WiFi | `3-UTUM-IOT` — your laptop must be on the same network (`MunichUrbanColab` isolates devices from each other) |
-| IP address | DHCP, changes after the Pi was off for a while — last seen `10.23.60.102` |
+| IP address | `10.23.60.102` — by DHCP, but the Pi requests this address at every boot ([`pi-setup/network/`](pi-setup/network/50-request-address.conf)) |
 | Web UI | `http://<ip>:8080` |
 | SSH | `ssh anton@<ip>` |
 | Robot network | Pi `eth0` = `192.168.5.12/24`, FR3 = `192.168.5.10` (Desk only reachable through the Pi) |
 
-**Finding the IP** when it changed (from a Linux laptop on the same WiFi):
+**Finding the IP** if it ever changes (from a Linux laptop on the same WiFi):
 
 ```bash
 seq 1 254 | xargs -P 64 -I{} ping -c1 -W1 -q 10.23.60.{} >/dev/null 2>&1
@@ -205,7 +205,9 @@ Ubuntu Server 24.04 (64-bit) via Raspberry Pi Imager (user `anton`), then on the
 | 5 | `sudo bash 04_connect_robot.sh 192.168.5.10` | static address on eth0 in the robot's subnet |
 | 6 | `bash 05_install_app.sh` | build `franka_teach_rt`, install and start both services |
 
-The robot IP is in `/etc/default/franka-teach`. Network notes from our setup: the laptop reaches the
+The robot IP is in `/etc/default/franka-teach`. To keep the WiFi address, copy
+`pi-setup/network/50-request-address.conf` to `/etc/systemd/network/10-netplan-wlan0.network.d/`
+and run `sudo networkctl reload`. Network notes from our setup: the laptop reaches the
 Pi over a WiFi without client isolation; the Pi 4 needs `key-management: psk-sha256` in netplan for
 WPA2 networks with protected management frames; the Pi has no clock battery, so NTP must stay on.
 Desk itself is only on the robot's network — use the UI buttons, or a tunnel:

@@ -189,6 +189,7 @@ safe travel height under *Positions → Settings*.
 | `joint_velocity_violation` | a joint got near the end of its range, where its allowed speed drops to zero | move closer to the middle of the workspace; use the automatic angle; lower speeds |
 | `cartesian_motion_generator_*_discontinuity` | commanded motion not smooth (or lost packets) | should not happen with `franka_teach_rt`; report with the log |
 | `communication_constraints_violation` | the 1 kHz loop missed packets | check `isolcpus` / IRQ tuning (`pi-setup/03`), CPU load on the Pi |
+| nothing starts, every mode switch ends in `joint_velocity_violation` with *"joint N … near the end of its range"* | the arm sits at the end stop of a joint; the robot refuses any control there | **Deactivate FCI & lock**, then in Desk use the joint limit recovery / guide that joint back with the Pilot buttons (programming mode), then **Unlock & activate FCI** |
 | arm sinks or rises in free drive | gripper mass wrong | correct the mass in the gripper card |
 | *force limit exceeded* while travelling | fast motion, force estimate swings | lower travel speed, or raise the limit slightly |
 | *Desk: control was not confirmed* | someone else holds control in Desk | press the Pilot circle button within 20 s |

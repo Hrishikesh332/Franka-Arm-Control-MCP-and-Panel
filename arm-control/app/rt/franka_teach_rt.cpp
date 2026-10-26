@@ -956,12 +956,18 @@ int main(int argc, char** argv) {
           }
         }
       }
-    } catch (const franka::Exception& e) {
+    } catch (const std::exception& e) {
+      // franka::Exception, but also network errors from libfranka's TCP layer (Poco), e.g. when
+      // FCI is switched off or Desk takes control: drop the connection and reconnect, never crash
       std::cerr << "robot connection: " << e.what() << " - retrying" << std::endl;
       {
         std::lock_guard<std::mutex> lock(shared.state_mutex);
         shared.last_error = e.what();
         shared.have_state = false;
+      }
+      {
+        std::lock_guard<std::mutex> lock(shared.mutex);
+        shared.requested_mode = Mode::kIdle;
       }
       std::this_thread::sleep_for(std::chrono::seconds(2));
     }

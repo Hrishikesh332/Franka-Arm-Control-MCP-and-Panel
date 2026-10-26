@@ -45,6 +45,9 @@ REACHED_ANGLE = math.radians(0.2)
 # Tuned in simulation: 'springy' is precise for mechanisms of ~1-20 N/mm, 'hard' for the bare desk.
 PRESS_SETTINGS = {'springy': (0.002, 0.010, 0.005), 'hard': (0.0005, 0.005, 0.001)}
 PRESS_ABORT_MARGIN = 15.0   # N above the target force
+MEASURE_RATE = 2.0          # N/s, force increase while measuring the force a part needs
+MEASURE_MAX = 40.0          # N, measuring stops here
+MEASURE_ABORT = 50.0        # N, the controller releases above this
 FORCE_FAULTS = {1: 'contact force too high', 2: 'maximum press depth reached without the force'}
 
 
@@ -74,6 +77,8 @@ class TeachServer:
         self.store = tc.Store(data_dir)
         self.robot_ip = robot_ip or os.environ.get('ROBOT_IP', '192.168.5.10')
         self.desk = None                 # Desk session holding control, see desk_start()
+        self.measure = {'running': False, 'target': 0.0, 'contact': 0.0, 'message': ''}
+        self.measure_action = None       # 'take' / 'cancel' requested by the UI
         self.desk_info = {'running': False, 'message': ''}
 
         self.lock = threading.Lock()
@@ -607,6 +612,69 @@ class TeachServer:
                 if self.rec is not None:
                     self.rec['paused'] = False
 
+    def measure_start(self, params):
+        """Press with a slowly rising force until the user takes the force the part needs."""
+        step = press_step(params)
+        with self.lock:
+            if self.rec is None:
+                raise RuntimeError('start a recording first')
+            if not self.follower_active:
+                raise RuntimeError('switch to Control mode to measure the force')
+        if self.measure['running']:
+            raise RuntimeError('already measuring')
+        self.measure_action = None
+        self.measure.update(running=True, target=0.0, contact=0.0, message='pressing')
+        threading.Thread(target=self.measure_run, args=(step,), daemon=True).start()
+
+    def measure_run(self, step):
+        gain, v_approach, v_contact = PRESS_SETTINGS[step['contact']]
+        with self.lock:
+            self.rec['paused'] = True
+        try:
+            self.record_stop_point()  # replay starts the press where the measurement started
+            target, dt = 1.0, 0.05
+            time.sleep(0.2)  # settle: the controller tares the force when force mode starts
+            self.link.send('force 1 {} {} {} {} {} {}'.format(
+                target, gain, v_approach, v_contact, step['max_depth'], MEASURE_ABORT))
+            time.sleep(0.2)
+            while True:
+                with self.lock:
+                    st, active = self.follower_status, self.follower_active
+                if not active or st is None or len(st) < 8:
+                    raise Aborted('the robot stopped')
+                if st[7]:
+                    raise Aborted(FORCE_FAULTS.get(int(st[7]), 'force fault'))
+                if not st[5]:
+                    raise Aborted('force mode ended')
+                contact = st[6]
+                self.measure.update(target=target, contact=contact)
+                if self.measure_action == 'cancel':
+                    self.measure['message'] = 'cancelled'
+                    return
+                if self.measure_action == 'take':
+                    step['force'] = round(max(0.5, contact) * 2) / 2  # 0.5 N steps
+                    self.record_append(step)
+                    self.measure['message'] = f'press step recorded with {step["force"]:.1f} N'
+                    return
+                # raise the target only once the force has caught up, so the arm never
+                # runs ahead into the part
+                if abs(contact - target) < max(0.5, 0.1 * target):
+                    if target >= MEASURE_MAX:
+                        self.measure['message'] = f'reached {MEASURE_MAX:.0f} N - take it or cancel'
+                    else:
+                        target = min(MEASURE_MAX, target + MEASURE_RATE * dt)
+                        self.link.send('force 1 {} {} {} {} {} {}'.format(
+                            target, gain, v_approach, v_contact, step['max_depth'], MEASURE_ABORT))
+                time.sleep(dt)
+        except Aborted as e:
+            self.measure['message'] = f'measuring stopped: {e}'
+        finally:
+            self.link.send('force 0')
+            self.measure['running'] = False
+            with self.lock:
+                if self.rec is not None:
+                    self.rec['paused'] = False
+
     def record_guarded(self, axis, dist, force, speed):
         step = {'type': 'guarded', 'dir': AXES[axis], 'dist': float(dist), 'force': float(force),
                 'speed': float(speed)}
@@ -658,6 +726,7 @@ class TeachServer:
                 'last_error': self.last_error,
                 'connected': self.robot_connected()[0],
                 'desk': dict(self.desk_info),
+                'measure': dict(self.measure),
                 'connection_problem': self.robot_connected()[1],
                 'success_rate': self.success_rate,
                 'mode': self.active_mode,
@@ -886,6 +955,18 @@ def make_app(node):
     def record_press():
         n, live = node.record_press(body())
         return ok(steps=n, executed=live)
+
+    @app.post('/api/record/measure')
+    def record_measure():
+        b = body()
+        action = b.get('action')
+        if action == 'start':
+            node.measure_start(b)
+        elif action in ('take', 'cancel'):
+            node.measure_action = action
+        else:
+            raise ValueError('action must be start, take or cancel')
+        return ok()
 
     @app.post('/api/record/finish')
     def record_finish():

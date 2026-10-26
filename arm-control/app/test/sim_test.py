@@ -88,6 +88,8 @@ class SimRobot:
                     self.force = {'F': d[1], 'gain': d[2], 'va': d[3], 'vc': d[4], 'depth': d[5],
                                   'abort': d[6], 'z0': self.p[2], 'touched': False, 'fault': 0,
                                   'tare': TABLE_K * max(0.0, TABLE_Z - self.p[2])}
+                elif d[0] and self.force is not None:
+                    self.force['F'] = d[1]  # target changed while pressing (like the controller)
                 elif not d[0]:
                     self.force = None
                     if self.target:
@@ -337,6 +339,30 @@ def main():
     assert len(stops) == 3 and 25 <= len(passes) <= 45, (len(stops), len(passes))
     print(f'continuous recording ok: {len(passes)} path points, {len(stops)} stop points '
           f'(nothing sampled while paused: {n_paused} steps then)')
+
+    # measuring the force a part needs: rising force until "take"
+    sim.hand_guide([0.5, 0.0, 0.20])
+    api('/api/record/start', {'gripper': 'fork', 'kind': 'place', 'speed': 0.5})
+    api('/api/mode', {'mode': 'control'})
+    api('/api/jog', {'axis': 'z', 'delta': -0.095})          # 5 mm above the table
+    time.sleep(2.5)
+    api('/api/record/measure', {'action': 'start', 'force': 10, 'contact': 'springy',
+                                'rotate_deg': 45, 'max_depth': 0.03})
+    end = time.time() + 20
+    while time.time() < end and api('/api/state')['measure']['contact'] < 6.0:
+        time.sleep(0.1)
+    m = api('/api/state')['measure']
+    assert m['running'] and m['contact'] >= 6.0, m
+    api('/api/record/measure', {'action': 'take'})
+    time.sleep(0.5)
+    m = api('/api/state')['measure']
+    assert not m['running'] and 'recorded' in m['message'], m
+    api('/api/jog', {'axis': 'z', 'delta': 0.09})
+    time.sleep(2.0)
+    api('/api/record/finish', {})
+    press = [x for x in api('/api/grippers/fork')['sequences']['place']['steps'] if x['type'] == 'press']
+    assert len(press) == 1 and 5.5 <= press[0]['force'] <= 8.0 and press[0]['rotate_deg'] == 45, press
+    print(f'measure force ok: {m["message"]}')
 
     # stop during a move
     api('/api/positions/shelf A/goto', method='POST')

@@ -126,6 +126,12 @@ A **pick** starts with the empty gripper above the part and ends above it holdin
 | guarded move | move along an axis until the contact force is reached — fails if there is no contact within the distance |
 | press | push down until a force is reached and hold it, optionally rotating about the vertical axis at a set speed, then release. *springy* for spring mechanisms, *hard* for rigid contact |
 
+**Finding the right force:** instead of guessing a number, use **Measure force…** in the recording bar
+(Control mode, gripper a few mm above the part): the arm presses with a slowly rising force (2 N/s,
+max 40 N) while the live force is shown, and **Take this force** records the press with it. Pushing the
+gripper by hand cannot be measured — the robot only senses the total external force, and the hand and
+the part cancel out.
+
 Sequences are stored **relative to their first pose** (horizontal offsets in its frame, heights
 absolute — the desk height is the same everywhere). Replaying at a position moves the first pose
 there.

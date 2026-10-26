@@ -122,7 +122,15 @@
       <label>hold <input id="pHold" type="number" value="0.5" step="0.5" min="0"> s</label>
       <label>max depth <input id="pDepth" type="number" value="30" step="5" min="1" max="100"> mm</label>
       <button id="recPress">Add</button>
+      <button id="measureStart" title="Control mode: the arm presses with slowly rising force; you take the force when the part is right">Measure force…</button>
     </div>
+    <div class="row" id="measurePanel" hidden>
+      <span class="big" style="font-variant-numeric: tabular-nums"><strong id="measureForce">0.0 N</strong></span>
+      <span class="muted" id="measureInfo"></span>
+      <button id="measureTake" class="primary big">✓ Take this force</button>
+      <button id="measureCancel" class="danger">Cancel</button>
+    </div>
+    <p class="muted" id="measureMsg"></p>
     <div class="row">
       <button id="recFinish" class="primary">Finish (arm is back above the object)</button>
       <button id="recCancel" class="danger">Discard</button>
@@ -376,6 +384,14 @@ function renderState() {
     $('recTitle').textContent = `Recording ${rec.kind} sequence of "${rec.gripper}"`;
     $('recCount').textContent = `${rec.steps} steps · ${rec.stops} stop points`
       + (rec.paused ? ' · paused while the press / guarded move runs' : '');
+    const m = s.measure || {};
+    $('measurePanel').hidden = !m.running;
+    $('measureStart').disabled = !!m.running;
+    if (m.running) {
+      $('measureForce').textContent = `${m.contact.toFixed(1)} N`;
+      $('measureInfo').textContent = `pressing, slowly increasing (now ${m.target.toFixed(1)} N, max 40 N) — take it when the part is right`;
+    }
+    $('measureMsg').textContent = m.running ? '' : (m.message || '');
     $('recContToggle').textContent = rec.continuous ? '● Recording path — pause' : '○ Path paused — record path';
     $('recContToggle').classList.toggle('on', rec.continuous);
     $('recHint').textContent = control
@@ -635,6 +651,12 @@ $('recGuarded').onclick = () => api('/api/record/guarded', { axis: $('gAxis').va
 $('recPress').onclick = () => api('/api/record/press', {
   force: Number($('pForce').value), contact: $('pContact').value, rotate_deg: Number($('pRot').value),
   rot_speed_deg: Number($('pRotV').value), hold_s: Number($('pHold').value), max_depth: $('pDepth').value / 1000 });
+const pressParams = () => ({
+  force: Number($('pForce').value), contact: $('pContact').value, rotate_deg: Number($('pRot').value),
+  rot_speed_deg: Number($('pRotV').value), hold_s: Number($('pHold').value), max_depth: $('pDepth').value / 1000 });
+$('measureStart').onclick = () => api('/api/record/measure', { action: 'start', ...pressParams() });
+$('measureTake').onclick = () => api('/api/record/measure', { action: 'take' });
+$('measureCancel').onclick = () => api('/api/record/measure', { action: 'cancel' });
 $('recFinish').onclick = async () => { await api('/api/record/finish', {}); renderGrippers(); };
 $('recCancel').onclick = () => { if (confirm('Discard this recording?')) api('/api/record/cancel', {}); };
 

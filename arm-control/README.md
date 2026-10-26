@@ -12,10 +12,36 @@ everywhere on the desk.
 > real FR3. Pick/place replay, guarded moves, presses and the automatic angle are tested against a
 > simulated robot and still need their first run on the arm. See [Status](#status).
 
+## Connecting to the Pi
+
+| | |
+|---|---|
+| Hostname | `6B-PI4` (mDNS / `.local` does not work on the venue WiFi — use the IP) |
+| User / password | `anton` / `1234` (also the `sudo` password) |
+| WiFi | `3-UTUM-IOT` — your laptop must be on the same network (`MunichUrbanColab` isolates devices from each other) |
+| IP address | DHCP, changes after the Pi was off for a while — last seen `10.23.60.42` |
+| Web UI | `http://<ip>:8080` |
+| SSH | `ssh anton@<ip>` |
+| Robot network | Pi `eth0` = `192.168.5.12/24`, FR3 = `192.168.5.10` (Desk only reachable through the Pi) |
+
+**Finding the IP** when it changed (from a Linux laptop on the same WiFi):
+
+```bash
+seq 1 254 | xargs -P 64 -I{} ping -c1 -W1 -q 10.23.60.{} >/dev/null 2>&1
+ip neigh | grep -i e4:5f:01:55:34:90        # the Pi's WiFi MAC address
+```
+
+**Desk** from the laptop: `ssh -L 8443:192.168.5.10:443 anton@<ip>`, then open
+`https://127.0.0.1:8443/desk/` (with `/desk/` — the bare address redirects and loses the port).
+
+**Services** on the Pi: `sudo systemctl status|restart franka-teach-rt franka-teach-ui`, logs with
+`journalctl -u franka-teach-rt -f`. Shut down cleanly before unplugging: `sudo poweroff`.
+
 ---
 
 ## Contents
 
+- [Connecting to the Pi](#connecting-to-the-pi)
 - [What it does](#what-it-does)
 - [How it works](#how-it-works)
 - [Concepts](#concepts)

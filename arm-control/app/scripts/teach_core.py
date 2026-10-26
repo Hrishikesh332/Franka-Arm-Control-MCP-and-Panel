@@ -124,6 +124,7 @@ def instantiate(seq, xy, yaw=None):
     """
     yaw = seq['recorded_yaw'] if yaw is None else yaw
     qz = quat_z(yaw)
+    turn = wrap(yaw - seq['recorded_yaw'])
     out = []
     for s in seq['steps']:
         s = dict(s)
@@ -131,6 +132,9 @@ def instantiate(seq, xy, yaw=None):
             d = rot2(s['p'][:2], yaw)
             s['p'] = [xy[0] + d[0], xy[1] + d[1], s['p'][2]]
             s['q'] = quat_normalize(quat_mul(qz, s['q']))
+            if s.get('joints'):
+                # seed for the IK: the recorded configuration, turned with the base joint
+                s['joints'] = [s['joints'][0] + turn] + list(s['joints'][1:])
         elif s['type'] == 'guarded':
             d = rot2(s['dir'][:2], yaw)
             s['dir'] = [d[0], d[1], s['dir'][2]]
@@ -159,6 +163,29 @@ def position_angle_mode(pos):
     return 'taught' if pos.get('yaw') is not None else 'auto'  # positions saved before modes
 
 
+def slerp(a, b, t):
+    d = sum(x * y for x, y in zip(a, b))
+    if d < 0:
+        b, d = [-x for x in b], -d
+    if d > 0.9995:
+        return quat_normalize([x + t * (y - x) for x, y in zip(a, b)])
+    th = math.acos(d)
+    return quat_normalize([(math.sin((1 - t) * th) * x + math.sin(t * th) * y) / math.sin(th)
+                           for x, y in zip(a, b)])
+
+
+def densify(p0, q0, step, max_dist, max_angle):
+    """Intermediate pass-through poses on the straight line from (p0, q0) to a pose step, so a
+    joint-space replay follows the Cartesian line (joint interpolation alone bends it)."""
+    n = max(math.ceil(math.dist(p0, step['p']) / max_dist), math.ceil(quat_angle(q0, step['q']) / max_angle))
+    out = []
+    for k in range(1, n):
+        t = k / n
+        out.append({'type': 'pose', 'blend': True, 'speed': step.get('speed'), 'dense': True,
+                    'p': [a + t * (b - a) for a, b in zip(p0, step['p'])], 'q': slerp(q0, step['q'], t)})
+    return out
+
+
 def start_pose(steps):
     first = next((s for s in steps if s['type'] == 'pose'), None)
     if first is None:
@@ -169,12 +196,15 @@ def start_pose(steps):
 def transit(cur_p, target_p, target_q, safe_z, speed):
     """Rise to a safe height, travel above the target, then descend onto it."""
     z = max(cur_p[2], target_p[2], safe_z)
+    # 'seed' tells the joint planner where to start its IK: from the current configuration, or
+    # from the configuration of the sequence that follows
     return [
         {'type': 'pose', 'p': [cur_p[0], cur_p[1], z], 'q': target_q, 'blend': True,
-         'speed': speed},
+         'speed': speed, 'seed': 'current'},
         {'type': 'pose', 'p': [target_p[0], target_p[1], z], 'q': target_q, 'blend': True,
-         'speed': speed},
-        {'type': 'pose', 'p': list(target_p), 'q': target_q, 'blend': False, 'speed': speed},
+         'speed': speed, 'seed': 'next'},
+        {'type': 'pose', 'p': list(target_p), 'q': target_q, 'blend': False, 'speed': speed,
+         'seed': 'next'},
     ]
 
 

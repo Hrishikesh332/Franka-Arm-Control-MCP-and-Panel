@@ -25,6 +25,7 @@ import time
 from flask import Flask, jsonify, request, send_from_directory
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import kinematics as kin  # noqa: E402
 import teach_core as tc  # noqa: E402
 from robot_link import RobotLink, SERVER_MODES  # noqa: E402
 from desk import Desk, DeskError  # noqa: E402
@@ -83,6 +84,7 @@ class TeachServer:
 
         self.lock = threading.Lock()
         self.pose = None            # (p, q) measured, q = [x, y, z, w]
+        self.joints = None          # measured joint angles (rad)
         self.pose_stamp = 0.0
         self.wrench = [0.0] * 6     # external force/torque in the base frame
         self.robot_mode = None
@@ -95,6 +97,7 @@ class TeachServer:
         self.connect_stamp = 0.0
         self.follower_status = None  # [dist, angle, v, w, active]
         self.active_mode = 'off'      # which of our controllers runs, see MODES
+        self.rt_mode = 'idle'         # franka_teach_rt's own mode (follow / jfollow / ...)
         self.target = None           # last target sent to the follower
         self.speed = 0.3             # manual (jog) speed fraction
         self.rec = None              # active recording, see record_start()
@@ -119,6 +122,7 @@ class TeachServer:
                 return
             self.connection_error = ''
             self.pose = (st['p'], st['q'])
+            self.joints = st.get('joints')
             self.pose_stamp = time.time()
             self.wrench = st['wrench']
             self.robot_mode = st['robot_mode']
@@ -127,6 +131,7 @@ class TeachServer:
             self.last_error = st['last_error']
             self.warning = st.get('warning', '')
             self.active_mode = st['mode']
+            self.rt_mode = st.get('rt_mode', '')
             self.follower_status = st['follower'] if st['mode'] == 'control' else None
 
     def record_loop(self):
@@ -140,7 +145,8 @@ class TeachServer:
                     or self.pose is None):
                 return
             p, q = self.pose
-            self.rec['steps'].append({'type': 'pose', 'p': list(p), 'q': list(q), 'blend': True})
+            self.rec['steps'].append({'type': 'pose', 'p': list(p), 'q': list(q), 'blend': True,
+                                      'joints': list(self.joints) if self.joints else None})
             self.rec['steps'] = tc.thin_continuous(self.rec['steps'])
 
     # ---------------------------------------------------------------- helpers
@@ -334,6 +340,8 @@ class TeachServer:
         with self.lock:
             if not self.follower_active:
                 raise RuntimeError('switch to control mode first')
+        self.ensure_motion('follow')
+        with self.lock:
             self.target = (list(p), list(q))
         self.link.send('target ' + ' '.join(repr(float(v)) for v in list(p) + list(q)))
 
@@ -467,9 +475,13 @@ class TeachServer:
         info['steps'] = len(steps)
         for i, s in enumerate(steps):
             info.update(step=i + 1, message=f'step {i + 1}/{len(steps)}: {s["type"]}')
-            if s['type'] == 'pose':
-                self.publish_speed(s.get('speed', default_speed))
+            if s['type'] == 'pose' and s.get('cartesian'):
                 self.send_target(s['p'], s['q'])
+                self.publish_speed(s.get('speed', default_speed))
+                self.wait_reached(s.get('blend', False), tare, max_force)
+            elif s['type'] == 'pose':
+                self.send_joint_target(s['jq'])
+                self.publish_speed(s.get('speed', default_speed))
                 self.wait_reached(s.get('blend', False), tare, max_force)
             elif s['type'] == 'wait':
                 end = time.time() + float(s['s'])
@@ -477,17 +489,92 @@ class TeachServer:
                     self.check(tare, max_force)
                     time.sleep(0.02)
             elif s['type'] == 'guarded':
+                self.ensure_motion('follow')
                 self.guarded_move(s, max_force)
             elif s['type'] == 'press':
+                self.ensure_motion('follow')
                 self.publish_speed(default_speed)
                 self.press(s, tare)
         last = next((s for s in reversed(steps) if s['type'] == 'pose'), None)
         if last is not None and last.get('blend'):
             self.wait_reached(False, tare, max_force)
 
+    def plan_joints(self, steps):
+        """Joint angles for every pose step (IK seeded with the recorded configuration), all
+        checked against the joint ranges before anything moves. Raises with the reason."""
+        with self.lock:
+            current = list(self.joints) if self.joints else None
+        if current is None:
+            raise RuntimeError('no joint angles from the robot yet')
+        # straight Cartesian segments: 5 mm / 3 deg pieces (2 cm while travelling at safe height)
+        dense = []
+        with self.lock:
+            last = (list(self.pose[0]), list(self.pose[1])) if self.pose else None
+        for s in steps:
+            if s['type'] == 'pose':
+                if last is not None:
+                    travel = bool(s.get('seed'))
+                    dense += [{**x, 'speed': s.get('speed')} if s.get('speed') else
+                              {k: v for k, v in x.items() if k != 'speed'}
+                              for x in tc.densify(last[0], last[1], s, 0.02 if travel else 0.005,
+                                                  math.radians(6 if travel else 3))]
+                last = (s['p'], s['q'])
+            elif s['type'] in ('guarded', 'press'):
+                last = None  # ends where the contact is, known only at run time
+                dense.append(s)
+                continue
+            if s['type'] == 'pose' and dense and dense[-1]['type'] in ('guarded', 'press'):
+                # from the contact point: a short straight Cartesian move (cannot be planned ahead)
+                s = {**s, 'cartesian': True}
+            dense.append(s)
+        steps = dense
+        prev = current
+        out = []
+        n_pose = 0
+        for i, s in enumerate(steps):
+            s = dict(s)
+            if s['type'] == 'pose':
+                n_pose += 0 if s.get('dense') else 1
+                seed = None if s.get('dense') else s.get('joints')
+                if s.get('seed') == 'current':
+                    seed = current
+                elif s.get('seed') == 'next':
+                    seed = next((x['joints'] for x in steps[i + 1:] if x['type'] == 'pose' and x.get('joints')),
+                                None)
+                if seed is None:
+                    seed = prev
+                q, err = kin.ik(kin.pose_to_matrix(s['p'], s['q']), seed)
+                if q is None:
+                    where = 'travelling there' if s.get('seed') else f'point {n_pose}'
+                    raise RuntimeError(f'not reachable here - {where} stays {err}')
+                s['jq'] = [float(v) for v in q]
+                prev = q
+            out.append(s)
+        return out
+
+    def ensure_motion(self, rt_mode):
+        """Switch franka_teach_rt between the joint follower ('jfollow') and the Cartesian
+        follower ('follow') inside control mode."""
+        if self.rt_mode == rt_mode:
+            return
+        self.link.send(f'mode {rt_mode}')
+        end = time.time() + 5.0
+        while self.rt_mode != rt_mode:
+            if time.time() > end:
+                raise Aborted(self.last_error or f'could not switch to {rt_mode}')
+            time.sleep(0.01)
+        with self.lock:
+            self.target = None
+        self.publish_speed(self.speed)
+
+    def send_joint_target(self, jq):
+        self.ensure_motion('jfollow')
+        self.link.send('jtarget ' + ' '.join(repr(float(v)) for v in jq))
+
     def start_job(self, label, steps, default_speed, on_success=None):
         if self.job is not None and self.job.is_alive():
             raise RuntimeError('the robot is busy')
+        steps = self.plan_joints(steps)  # refuses unreachable motions before anything moves
         with self.lock:
             if self.rec is not None:
                 raise RuntimeError('finish or discard the recording first')
@@ -630,10 +717,12 @@ class TeachServer:
             if self.rec is None:
                 raise RuntimeError('not recording')
             last = next((s for s in reversed(self.rec['steps']) if s['type'] == 'pose'), None)
+            joints = list(self.joints) if self.joints else None
             if last and math.dist(last['p'], p) < 1e-3 and tc.quat_angle(last['q'], q) < math.radians(1):
                 last['blend'] = False
+                last['joints'] = joints
                 return len(self.rec['steps'])
-            self.rec['steps'].append({'type': 'pose', 'p': p, 'q': q, 'blend': False})
+            self.rec['steps'].append({'type': 'pose', 'p': p, 'q': q, 'blend': False, 'joints': joints})
             return len(self.rec['steps'])
 
     def record_live(self, step, run):
@@ -761,6 +850,7 @@ class TeachServer:
             return {
                 'pose': {'p': pose[0], 'q': pose[1], 'yaw': tc.yaw_of(pose[1])} if pose else None,
                 'pose_age': time.time() - self.pose_stamp if pose else None,
+                'joints': self.joints,
                 'force': math.sqrt(sum(c * c for c in self.wrench[:3])),
                 'force_z': self.wrench[2],
                 'press_force': self.follower_status[6]

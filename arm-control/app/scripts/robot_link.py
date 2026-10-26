@@ -13,18 +13,18 @@ COMMAND_ADDR = ('127.0.0.1', 5555)
 STATE_ADDR = ('127.0.0.1', 5556)
 
 # franka_teach_rt mode names -> modes of the teach server
-RT_MODES = {'idle': 'off', 'free': 'guide', 'follow': 'control', 'home': 'home'}
-SERVER_MODES = {v: k for k, v in RT_MODES.items()}
+RT_MODES = {'idle': 'off', 'free': 'guide', 'follow': 'control', 'home': 'home', 'jfollow': 'control'}
+SERVER_MODES = {'off': 'idle', 'guide': 'free', 'control': 'follow', 'home': 'home'}
 
 
 def parse_state(datagram):
-    """S <mode> <robot_mode> <success> <O_T_EE x16> <wrench x6> <follower x8> <counter>|<errors>|<last error>
+    """S <mode> <robot_mode> <success> <O_T_EE x16> <wrench x6> <follower x8> <q x7> <counter>|<errors>|<last error>|<warning>
     or E <reason> while franka_teach_rt has no connection to the robot."""
     if datagram.startswith('E'):
         return {'connected': False, 'last_error': datagram[1:].strip()}
     head, errors, last_error, *rest = datagram.split('|', 3)
     f = head.split()
-    if f[0] != 'S' or len(f) != 35:
+    if f[0] != 'S' or len(f) != 42:
         raise ValueError('bad state message')
     T = [float(v) for v in f[4:20]]  # column major 4x4
     rot = [[T[0], T[4], T[8]], [T[1], T[5], T[9]], [T[2], T[6], T[10]]]
@@ -35,13 +35,15 @@ def parse_state(datagram):
     return {
         'connected': True,
         'mode': RT_MODES.get(f[1], 'off'),
+        'rt_mode': f[1],
         'robot_mode': int(f[2]),
         'success_rate': float(f[3]),
         'p': [T[12], T[13], T[14]],
         'q': quat_from_matrix(rot),
         'wrench': [float(v) for v in f[20:26]],
         'follower': [float(v) for v in f[26:34]],
-        'counter': int(f[34]),
+        'joints': [float(v) for v in f[34:41]],
+        'counter': int(f[41]),
         'errors': errors,
         'last_error': last_error.strip(),
         'warning': rest[0].strip() if rest else '',

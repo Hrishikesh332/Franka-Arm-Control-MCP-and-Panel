@@ -7,6 +7,8 @@
 //             optional force mode along z (pressing)
 //   free    - torque control with gravity compensation and joint damping (hand guiding)
 //   home    - slow joint motion to the ready pose (every joint well inside its range), then idle
+//   jfollow - joint-space follower: smoothly moves to target joint angles chosen by the server
+//             (replaying recorded configurations instead of letting the robot's IK choose)
 //
 // The teach server (Python) talks to it over two local UDP ports with one-line text messages:
 // commands to 127.0.0.1:5555, state broadcasts at 50 Hz to 127.0.0.1:5556 (see send_state()).
@@ -78,12 +80,18 @@ constexpr double kFollowStopMargin = 0.15;        // rad
 constexpr std::array<double, 7> kHomePose{{0.0, -M_PI_4, 0.0, -3.0 * M_PI_4, 0.0, M_PI_2, M_PI_4}};
 constexpr double kHomeSpeed = 0.3;                // rad/s
 constexpr double kHomeStopTime = 0.5;             // s to slow down to standstill
+// Joint follower (at speed scale 1): all joints move synchronously along a straight line in joint
+// space; the fastest joint is limited to these.
+constexpr double kJointMaxVelocity = 1.0;         // rad/s
+constexpr double kJointMaxAcceleration = 2.0;     // rad/s^2
+constexpr double kJointTargetMargin = 0.1;        // rad, targets are clamped this far inside the ranges
 
-enum class Mode { kIdle, kFollow, kFree, kHome };
+enum class Mode { kIdle, kFollow, kFree, kHome, kJointFollow };
 enum ForceFault { kNoFault = 0, kAbortForce = 1, kMaxDepth = 2 };
 
 const char* mode_name(Mode m) {
-  return m == Mode::kFollow ? "follow" : m == Mode::kFree ? "free" : m == Mode::kHome ? "home" : "idle";
+  return m == Mode::kFollow ? "follow" : m == Mode::kFree ? "free" : m == Mode::kHome ? "home"
+       : m == Mode::kJointFollow ? "jfollow" : "idle";
 }
 
 // Per joint: |dq| as a fraction of the position-dependent velocity limit in that direction.
@@ -162,6 +170,8 @@ struct Shared {
   std::mutex mutex;
   Mode requested_mode{Mode::kIdle};
   uint64_t target_seq{0};
+  uint64_t jtarget_seq{0};
+  std::array<double, 7> jtarget{};
   Eigen::Vector3d target_p{Eigen::Vector3d::Zero()};
   Eigen::Quaterniond target_q{Eigen::Quaterniond::Identity()};
   uint64_t force_seq{0};
@@ -169,7 +179,9 @@ struct Shared {
   std::deque<std::string> parameter_commands;  // executed in idle mode
   std::atomic<bool> stop_requested{false};
   std::atomic<double> speed{0.3};
-  std::atomic<int> joint_warning{0};  // 1-based joint that follow mode stopped for (0 = none)
+  std::atomic<int> joint_warning{0};
+  char start_info[160]{};              // written once at a motion start, printed by the comm thread
+  std::atomic<bool> start_info_ready{false};  // 1-based joint that follow mode stopped for (0 = none)
   std::atomic<bool> running{true};
 
   // state snapshot written by the realtime loop
@@ -391,7 +403,7 @@ void send_state(Shared& shared, int sock, const sockaddr_in& dest) {
     error = shared.last_error;
     counter = shared.counter;
   }
-  // S <mode> <robot_mode> <success> <O_T_EE x16> <O_F_ext_hat_K x6> <follower x8> <counter>
+  // S <mode> <robot_mode> <success> <O_T_EE x16> <O_F_ext_hat_K x6> <follower x8> <q x7> <counter>
   //   |<current errors>|<last error>|<warning>
   // or, while there is no connection to the robot:  E <reason>
   std::ostringstream out;
@@ -401,6 +413,7 @@ void send_state(Shared& shared, int sock, const sockaddr_in& dest) {
   for (double v : s.O_T_EE) out << ' ' << v;
   for (double v : s.O_F_ext_hat_K) out << ' ' << v;
   for (double v : f) out << ' ' << v;
+  for (double v : s.q) out << ' ' << v;
   const int joint = shared.joint_warning.load();
   out << ' ' << counter << '|' << static_cast<std::string>(s.current_errors) << '|' << error << '|'
       << (joint ? "joint " + std::to_string(joint) + " near the end of its range - stopped" : "");
@@ -417,11 +430,22 @@ void handle_command(Shared& shared, const std::string& line) {
     std::string m;
     in >> m;
     shared.requested_mode = m == "follow" ? Mode::kFollow : m == "free" ? Mode::kFree
-                            : m == "home"   ? Mode::kHome   : Mode::kIdle;
+                            : m == "home"   ? Mode::kHome
+                            : m == "jfollow" ? Mode::kJointFollow : Mode::kIdle;
     shared.joint_warning = 0;
     if (shared.requested_mode != Mode::kIdle) {
       std::lock_guard<std::mutex> state_lock(shared.state_mutex);
       shared.last_error.clear();
+    }
+  } else if (cmd == "jtarget") {
+    std::array<double, 7> q{};
+    for (double& x : q) in >> x;
+    if (in) {
+      for (size_t i = 0; i < 7; i++) {  // never aim into the last kJointTargetMargin of a range
+        q[i] = std::clamp(q[i], kJointMin[i] + kJointTargetMargin, kJointMax[i] - kJointTargetMargin);
+      }
+      shared.jtarget = q;
+      shared.jtarget_seq++;
     }
   } else if (cmd == "target") {
     double v[7];
@@ -485,6 +509,9 @@ void communication_thread(Shared& shared) {
         buf[n] = '\0';
         handle_command(shared, std::string(buf));
       }
+    }
+    if (shared.start_info_ready.exchange(false)) {
+      std::cout << shared.start_info << std::endl;
     }
     if (std::chrono::steady_clock::now() >= next_state) {
       send_state(shared, tx, dest);
@@ -564,7 +591,19 @@ void run_follow(franka::Robot& robot, Shared& shared) {
   double governor = 1.0;  // slows the follower down when a joint approaches its velocity limit
   robot.control([&](const franka::RobotState& state, franka::Duration period) -> franka::CartesianPose {
     if (first) {
-      follower.reset(state.O_T_EE_c);  // the robot expects the first command at O_T_EE_c
+      // The robot expects the first command at its last commanded pose (O_T_EE_c). After a joint
+      // motion that value may be stale, so fall back to the desired / measured pose if it is off.
+      auto offset = [&](const std::array<double, 16>& T) {
+        return std::sqrt(std::pow(T[12] - state.O_T_EE[12], 2) + std::pow(T[13] - state.O_T_EE[13], 2) +
+                         std::pow(T[14] - state.O_T_EE[14], 2));
+      };
+      const double off_c = offset(state.O_T_EE_c), off_d = offset(state.O_T_EE_d);
+      const char* used = off_c < 0.002 ? "O_T_EE_c" : off_d < 0.002 ? "O_T_EE_d" : "O_T_EE";
+      follower.reset(off_c < 0.002 ? state.O_T_EE_c : off_d < 0.002 ? state.O_T_EE_d : state.O_T_EE);
+      std::snprintf(shared.start_info, sizeof(shared.start_info),
+                    "follow starts at %s (O_T_EE_c %.2f mm, O_T_EE_d %.2f mm from measured)", used,
+                    off_c * 1000, off_d * 1000);
+      shared.start_info_ready = true;
       first = false;
     }
     std::unique_lock<std::mutex> lock(shared.mutex, std::try_to_lock);
@@ -599,6 +638,93 @@ void run_follow(franka::Robot& robot, Shared& shared) {
       return franka::MotionFinished(franka::CartesianPose(pose));
     }
     return franka::CartesianPose(pose);
+  });
+}
+
+void run_joint_follow(franka::Robot& robot, Shared& shared) {
+  using Vec7 = Eigen::Matrix<double, 7, 1>;
+  Vec7 q_ref, q_f1, q_cmd, q_target, v = Vec7::Zero();
+  bool first = true, leaving = false, holding = false;
+  double governor = 1.0;
+  uint64_t seq;
+  {
+    std::lock_guard<std::mutex> lock(shared.mutex);
+    seq = shared.jtarget_seq;  // ignore targets sent before this mode started
+  }
+  shared.stop_requested = false;
+  robot.control([&](const franka::RobotState& state, franka::Duration period) -> franka::JointPositions {
+    if (first) {
+      // start at the last commanded joint positions (q_d); fall back to measured if they are off
+      const Vec7 q_d = Eigen::Map<const Vec7>(state.q_d.data()), q = Eigen::Map<const Vec7>(state.q.data());
+      const double off = (q_d - q).cwiseAbs().maxCoeff();
+      q_ref = q_f1 = q_cmd = q_target = off < 0.01 ? q_d : q;
+      std::snprintf(shared.start_info, sizeof(shared.start_info), "jfollow starts at %s (q_d %.4f rad from measured)",
+                    off < 0.01 ? "q_d" : "q", off);
+      shared.start_info_ready = true;
+      first = false;
+    }
+    {
+      std::unique_lock<std::mutex> lock(shared.mutex, std::try_to_lock);
+      if (lock.owns_lock()) {
+        if (shared.jtarget_seq != seq) {
+          seq = shared.jtarget_seq;
+          q_target = Eigen::Map<const Vec7>(shared.jtarget.data());
+          holding = false;
+          shared.joint_warning = 0;
+        }
+        leaving = leaving || shared.requested_mode != Mode::kJointFollow || !shared.running;
+      }
+    }
+    if (shared.stop_requested.exchange(false) || leaving) {
+      holding = true;
+    }
+    if (const int joint = joint_approaching_limit(state, kFollowStopMargin)) {
+      holding = true;
+      shared.joint_warning = joint;
+    }
+    const double dt = period.toSec() > 0.0 ? std::clamp(period.toSec(), 0.0005, 0.005) : 0.001;
+    const auto ratios = joint_speed_ratios(state.q, state.dq);
+    const double worst = *std::max_element(ratios.begin(), ratios.end());
+    const double wanted = std::clamp((0.85 - worst) / (0.85 - kJointSpeedSoftLimit), 0.05, 1.0);
+    governor += (wanted < governor ? 0.2 : 0.01) * (wanted - governor);
+    const double vmax = kJointMaxVelocity * shared.speed.load() * governor;
+
+    // planner: straight line in joint space, the fastest joint bounded (infinity norm)
+    const Vec7 e = q_target - q_ref;
+    const double dist = e.cwiseAbs().maxCoeff();
+    Vec7 v_des = Vec7::Zero();
+    if (!holding && dist > 1e-7) {
+      v_des = e / dist * std::min(vmax, std::sqrt(2.0 * kJointMaxAcceleration * dist));
+    }
+    Vec7 dv = v_des - v;
+    const double dv_max = dv.cwiseAbs().maxCoeff();
+    if (dv_max > kJointMaxAcceleration * dt) {
+      dv *= kJointMaxAcceleration * dt / dv_max;
+    }
+    v += dv;
+    q_ref += v * dt;
+    if (!holding && dist < 1e-5 && v.cwiseAbs().maxCoeff() < 2.0 * kJointMaxAcceleration * dt) {
+      q_ref = q_target;
+      v.setZero();
+    }
+    if (holding && v.cwiseAbs().maxCoeff() < 1e-9) {
+      q_target = q_ref;
+    }
+    // smoothing: two first-order filters (continuous acceleration)
+    const Vec7 q_prev = q_cmd;
+    const double a = std::min(1.0, dt / kSmoothingTime);
+    q_f1 += a * (q_ref - q_f1);
+    q_cmd += a * (q_f1 - q_cmd);
+    const double remaining = (q_target - q_cmd).cwiseAbs().maxCoeff();
+    const double speed = ((q_cmd - q_prev) / dt).cwiseAbs().maxCoeff();
+    store_state(shared, Mode::kJointFollow, state, {remaining, 0.0, speed, 0.0, 1.0, 0.0, 0.0, 0.0});
+
+    std::array<double, 7> out{};
+    Eigen::Map<Vec7>(out.data()) = q_cmd;
+    if (leaving && v.cwiseAbs().maxCoeff() < 1e-9 && (q_cmd - q_ref).cwiseAbs().maxCoeff() < 1e-7) {
+      return franka::MotionFinished(franka::JointPositions(out));
+    }
+    return franka::JointPositions(out);
   });
 }
 
@@ -713,6 +839,8 @@ int main(int argc, char** argv) {
             run_free(robot, shared);
           } else if (mode == Mode::kHome) {
             run_home(robot, shared);
+          } else if (mode == Mode::kJointFollow) {
+            run_joint_follow(robot, shared);
           } else {
             run_idle(robot, shared);
           }

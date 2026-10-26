@@ -41,13 +41,29 @@ def slerp(a, b, t):
 
 
 # ---------------------------------------------------------------- simulated robot
+sys.path.insert(0, os.path.join(PKG, 'scripts'))
+import kinematics as kin  # noqa: E402
+from robot_link import quat_from_matrix  # noqa: E402
+
+READY = [0.0, -math.pi / 4, 0.0, -3 * math.pi / 4, 0.0, math.pi / 2, math.pi / 4]
+J_MAX = 1.0           # rad/s at speed scale 1 (as franka_teach_rt's joint follower)
+
+
+def fk_pose(joints):
+    T = kin.fk(joints)
+    return [float(v) for v in T[:3, 3]], quat_from_matrix(T[:3, :3].tolist())
+
+
 class SimRobot:
     def __init__(self):
         self.cb = None
         self.mode = 'off'
+        self.rt_mode = 'idle'
         self.lock = threading.Lock()
-        self.p = [0.4, 0.0, 0.3]
-        self.q = [1.0, 0.0, 0.0, 0.0]  # pointing down
+        self.joints = list(READY)
+        self.p, self.q = fk_pose(self.joints)
+        self.jtarget = None
+        self.joints_stale = False
         self.target = None
         self.scale = 0.3
         self.active = False
@@ -68,20 +84,25 @@ class SimRobot:
         f = line.split()
         with self.lock:
             if f[0] == 'mode' and f[1] == 'home':
-                self.mode, self.active, self.target = 'home', False, None
+                self.mode, self.rt_mode, self.active, self.target = 'home', 'home', False, None
 
                 def arrive():  # like franka_teach_rt: joint motion to the ready pose, then idle
                     time.sleep(0.5)
                     with self.lock:
-                        self.p, self.q, self.mode = [0.307, 0.0, 0.59], [1.0, 0.0, 0.0, 0.0], 'off'
+                        self.joints = list(READY)
+                        self.p, self.q = fk_pose(self.joints)
+                        self.mode, self.rt_mode = 'off', 'idle'
                 threading.Thread(target=arrive, daemon=True).start()
             elif f[0] == 'mode':
-                self.mode = {'idle': 'off', 'free': 'guide', 'follow': 'control'}[f[1]]
-                self.active, self.target = self.mode == 'control', None
+                self.mode = {'idle': 'off', 'free': 'guide', 'follow': 'control', 'jfollow': 'control'}[f[1]]
+                self.rt_mode = f[1]
+                self.active, self.target, self.jtarget = self.mode == 'control', None, None
                 if self.mode != 'control':
                     self.force = None
             elif f[0] == 'load':
                 self.load = (float(f[1]), [float(v) for v in f[2:5]])
+            elif f[0] == 'jtarget':
+                self.jtarget = [float(x) for x in f[1:8]]
             elif f[0] == 'target':
                 v = [float(x) for x in f[1:8]]
                 self.target = (v[:3], v[3:])
@@ -109,6 +130,7 @@ class SimRobot:
             self.p = list(p)
             if q is not None:
                 self.q = list(q)
+            self.joints_stale = True
         time.sleep(0.03)  # let a few pose messages reach the server
 
     def loop(self):
@@ -118,7 +140,18 @@ class SimRobot:
             with self.lock:
                 v, w, ang, fm = 0.0, 0.0, 0.0, self.force
                 contact = TABLE_K * max(0.0, TABLE_Z - self.p[2])
-                if self.active and self.target is not None:
+                if self.active and self.rt_mode == 'jfollow' and self.jtarget is not None:
+                    # joint follower: straight line in joint space, pose from forward kinematics
+                    e = [t - j for t, j in zip(self.jtarget, self.joints)]
+                    d = max(abs(c) for c in e)
+                    step = min(d, J_MAX * self.scale * dt)
+                    if d > 1e-12:
+                        self.joints = [j + c / d * step for j, c in zip(self.joints, e)]
+                        self.p, self.q = fk_pose(self.joints)
+                    v = step / dt if d > 1e-9 else 0.0
+                    dist = max(0.0, d - step)
+                elif self.active and self.rt_mode == 'follow' and self.target is not None:
+                    self.joints_stale = True
                     tp, tq = self.target
                     e = [tp[i] - self.p[i] for i in range(3)]
                     if fm:
@@ -160,8 +193,15 @@ class SimRobot:
                 p, q, active = list(self.p), list(self.q), self.active
                 fstat = [1.0 if self.force else 0.0,
                          (contact - fm['tare']) if fm else 0.0, float(self.force_fault)]
+            with self.lock:
+                if self.joints_stale:  # Cartesian motion / hand guiding: joints from IK
+                    sol, _ = kin.ik(kin.pose_to_matrix(self.p, self.q), self.joints, iterations=30)
+                    if sol is not None:
+                        self.joints = [float(v) for v in sol]
+                    self.joints_stale = False
+                joints = list(self.joints)
             if self.cb:
-                self.cb({'connected': True, 'mode': self.mode, 'robot_mode': 2 if active else 1, 'success_rate': 1.0,
+                self.cb({'connected': True, 'mode': self.mode, 'rt_mode': self.rt_mode, 'joints': joints, 'robot_mode': 2 if active else 1, 'success_rate': 1.0,
                          'p': p, 'q': q, 'wrench': [0.0, 0.0, -fz, 0.0, 0.0, 0.0],
                          'follower': [dist, ang, v, w, 1.0 if active else 0.0] + fstat,
                          'counter': 0, 'errors': [], 'last_error': ''})
@@ -242,16 +282,18 @@ def main():
 
     # automatic angle: at a position 90 deg further round the base the whole pick turns with it
     api('/api/active', {'holding': False})
+    api('/api/mode', {'mode': 'guide'})          # positions are taught by hand, in free drive
     sim.hand_guide([0.0, 0.5, 0.25])
     api('/api/positions', {'name': 'left', 'angle': 'auto'})
     sim.trace.clear()
     api('/api/positions/left/pick', method='POST')
     assert wait_job() == 'done'
-    yaw = math.degrees(api('/api/state')['pose']['yaw'])
+    rec_yaw = math.degrees(api('/api/grippers/fork')['sequences']['pick']['recorded_yaw'])
+    yaw = math.degrees(ts.tc.wrap(api('/api/state')['pose']['yaw'] - math.radians(rec_yaw)))
     side = min(sim.trace, key=lambda p: p[2])
     # recorded: side step -4 cm in y at bearing 0 -> now +4 cm in x at bearing 90 deg
     assert abs(yaw - 90) < 1 and abs(side[0] - 0.04) < 2e-3 and abs(side[1] - 0.5) < 2e-3, (yaw, side)
-    print('auto angle ok: yaw %.1f deg, side step at %s' % (yaw, [round(v, 3) for v in side]))
+    print('auto angle ok: turned %.1f deg, side step at %s' % (yaw, [round(v, 3) for v in side]))
 
     # picking again while holding is refused, placing without a sequence is refused
     r = api('/api/positions/shelf A/pick', method='POST', expect_ok=False)
@@ -398,11 +440,21 @@ def main():
     api('/api/settings', {'max_force': 25.0})
     print(f'to_press ok: replay pressed with {sim.max_press:.1f} N instead of hitting the force limit')
 
+    # an unreachable position is refused before anything moves
+    api('/api/desk', method='DELETE')
+    api('/api/positions', {'name': 'too far', 'desk_xy': [950, 0]})
+    api('/api/active', {'gripper': 'fork', 'holding': False})
+    sim.trace.clear()
+    r = api('/api/positions/too far/pick', method='POST', expect_ok=False)
+    moved = max((abs(a - b) for t in sim.trace for a, b in zip(t, sim.trace[0])), default=0.0)
+    assert r['ok'] is False and 'not reachable' in r['error'] and moved < 1e-6, (r, moved)
+    print('unreachable refused before moving:', r['error'][:90])
+
     # homing: joint motion to the ready pose, ends in Hold
     api('/api/home', method='POST')
     assert wait_job() == 'done'
     st = api('/api/state')
-    assert st['mode'] == 'off' and abs(st['pose']['p'][2] - 0.59) < 1e-6, st['mode']
+    assert st['mode'] == 'off' and max(abs(a - b) for a, b in zip(st['joints'], READY)) < 1e-9, st['mode']
     print('home ok')
 
     # stop during a move

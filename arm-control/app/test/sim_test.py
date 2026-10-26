@@ -64,6 +64,7 @@ class SimRobot:
         self.p, self.q = fk_pose(self.joints)
         self.jtarget = None
         self.joints_stale = False
+        self.path, self.path_building, self.path_t = None, [], 0.0
         self.target = None
         self.scale = 0.3
         self.active = False
@@ -101,6 +102,15 @@ class SimRobot:
                     self.force = None
             elif f[0] == 'load':
                 self.load = (float(f[1]), [float(v) for v in f[2:5]])
+            elif f[0] == 'jpath_begin':
+                self.path_building = []
+            elif f[0] == 'jpath':
+                v = [float(x) for x in f[1:]]
+                self.path_building += [v[i:i + 7] for i in range(0, len(v), 7)]
+            elif f[0] == 'jpath_end':
+                if self.path_building and max(abs(a - b) for a, b in zip(self.path_building[0], self.joints)) < 0.02:
+                    self.path, self.path_t, self.jtarget = self.path_building, 0.0, None
+                self.path_building = []
             elif f[0] == 'jtarget':
                 self.jtarget = [float(x) for x in f[1:8]]
             elif f[0] == 'target':
@@ -115,7 +125,8 @@ class SimRobot:
                 if d[0] and self.force is None:
                     self.force_fault = 0
                     self.force = {'F': d[1], 'gain': d[2], 'va': d[3], 'vc': d[4], 'depth': d[5],
-                                  'abort': d[6], 'z0': self.p[2], 'touched': False, 'fault': 0,
+                                  'abort': d[6], 'travel': d[7] if len(d) > 7 else 0.03, 'zc': None,
+                                  'z0': self.p[2], 'touched': False, 'fault': 0,
                                   'tare': TABLE_K * max(0.0, TABLE_Z - self.p[2])}
                 elif d[0] and self.force is not None:
                     self.force['F'] = d[1]  # target changed while pressing (like the controller)
@@ -140,7 +151,18 @@ class SimRobot:
             with self.lock:
                 v, w, ang, fm = 0.0, 0.0, 0.0, self.force
                 contact = TABLE_K * max(0.0, TABLE_Z - self.p[2])
-                if self.active and self.rt_mode == 'jfollow' and self.jtarget is not None:
+                if self.active and self.rt_mode == 'jfollow' and self.path is not None:
+                    # trajectory playback like franka_teach_rt (samples every 10 ms)
+                    self.path_t += dt
+                    x = min(self.path_t / 0.01, len(self.path) - 1)
+                    i0 = int(x); i1 = min(i0 + 1, len(self.path) - 1); fr = x - i0
+                    self.joints = [(1 - fr) * a + fr * b for a, b in zip(self.path[i0], self.path[i1])]
+                    self.p, self.q = fk_pose(self.joints)
+                    dist = max(0.0, (len(self.path) - 1) * 0.01 - self.path_t)
+                    v = 0.0 if dist == 0.0 else 0.1
+                    if dist == 0.0:
+                        self.path = None
+                elif self.active and self.rt_mode == 'jfollow' and self.jtarget is not None:
                     # joint follower: straight line in joint space, pose from forward kinematics
                     e = [t - j for t, j in zip(self.jtarget, self.joints)]
                     d = max(abs(c) for c in e)
@@ -173,12 +195,15 @@ class SimRobot:
                     dist = 0.0
                 if fm and self.active:
                     c = contact - fm['tare']
-                    fm['touched'] = fm['touched'] or c > min(2.0, 0.3 * fm['F'])
+                    if not fm['touched'] and c > min(2.0, 0.3 * fm['F']):
+                        fm['touched'], fm['zc'] = True, self.p[2]
                     lim = fm['vc'] if fm['touched'] else fm['va']
                     vz = -max(-lim, min(lim, fm['gain'] * (fm['F'] - c)))
                     if c > fm['abort']:
                         fm['fault'] = 1
-                    elif fm['z0'] - self.p[2] > fm['depth'] and vz < 0:
+                    elif not fm['touched'] and fm['z0'] - self.p[2] > fm['depth'] and vz < 0:
+                        fm['fault'] = 3
+                    elif fm['touched'] and fm['zc'] - self.p[2] > fm['travel'] and vz < 0:
                         fm['fault'] = 2
                     if fm['fault']:
                         self.force_fault = fm['fault']
@@ -362,7 +387,7 @@ def main():
     api('/api/active', {'holding': True})
     api('/api/positions/shelf A/place', method='POST')
     msg = wait_job()
-    assert 'maximum press depth' in msg and api('/api/state')['holding'] is True, msg
+    assert 'no contact within the search distance' in msg and api('/api/state')['holding'] is True, msg
     print('press depth abort ok:', msg)
 
     # continuous recording by hand: path is sampled and thinned, can be paused for stop points

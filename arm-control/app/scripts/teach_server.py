@@ -49,7 +49,12 @@ PRESS_ABORT_MARGIN = 15.0   # N above the target force
 MEASURE_RATE = 2.0          # N/s, force increase while measuring the force a part needs
 MEASURE_MAX = 40.0          # N, measuring stops here
 MEASURE_ABORT = 50.0        # N, the controller releases above this
-FORCE_FAULTS = {1: 'contact force too high', 2: 'maximum press depth reached without the force'}
+FORCE_FAULTS = {1: 'contact force too high',
+                2: 'went the allowed distance into the object without reaching the force',
+                3: 'no contact within the search distance'}
+J_VEL = 1.0        # rad/s at speed 1 - fastest joint on planned trajectories (as franka_teach_rt)
+C_VEL = 0.25       # m/s at speed 1 - Cartesian speed on planned trajectories
+RAMP_TIME = 0.4    # s to reach full speed on a trajectory (and to brake)
 
 
 class Aborted(RuntimeError):
@@ -65,11 +70,20 @@ def press_step(b):
     force = float(b.get('force', 10.0))
     if not 0.5 <= force <= 50.0:
         raise ValueError('press force must be between 0.5 and 50 N')
+
+    def num(key, default):  # empty / missing / non-positive fields fall back to the default
+        try:
+            v = float(b.get(key))
+        except (TypeError, ValueError):
+            return default
+        return v if v > 0 else default
     return {'type': 'press', 'force': force, 'contact': contact,
-            'rotate_deg': float(b.get('rotate_deg', 0.0)),
-            'rot_speed_deg': min(90.0, max(1.0, float(b.get('rot_speed_deg', 30.0)))),
-            'hold_s': min(60.0, max(0.0, float(b.get('hold_s', 0.5)))),
-            'max_depth': min(0.1, max(0.001, float(b.get('max_depth', 0.03))))}
+            'rotate_deg': float(b.get('rotate_deg') or 0.0),
+            'rot_speed_deg': min(90.0, max(2.0, num('rot_speed_deg', 30.0))),
+            'hold_s': min(60.0, max(0.0, float(b.get('hold_s') or 0.0))),
+            # search: how far below the start the object may be; travel: how far into it after contact
+            'max_depth': min(0.1, max(0.002, num('max_depth', 0.03))),
+            'max_travel': min(0.1, max(0.002, num('max_travel', 0.03)))}
 
 
 class TeachServer:
@@ -104,6 +118,7 @@ class TeachServer:
         self.job = None              # running motion thread
         self.abort = threading.Event()
         self.job_info = {'running': False, 'label': '', 'step': 0, 'steps': 0, 'message': ''}
+        self.notes = []              # remarks collected during a job (shown with its result)
         self.collision_set = False
         self.load_applied = None     # (mass, com) last sent to the robot
 
@@ -426,8 +441,9 @@ class TeachServer:
         abort_force = force + PRESS_ABORT_MARGIN
         limit = abort_force + 5.0  # the controller aborts first; this is the server-side backstop
         time.sleep(0.2)  # settle: the controller tares the force estimate when force mode starts
-        self.link.send('force 1 {} {} {} {} {} {}'.format(
-            force, gain, v_approach, v_contact, float(step.get('max_depth', 0.03)), abort_force))
+        self.link.send('force 1 {} {} {} {} {} {} {}'.format(
+            force, gain, v_approach, v_contact, float(step.get('max_depth', 0.03)), abort_force,
+            float(step.get('max_travel', 0.03))))
         try:
             def wait(cond, timeout, what):
                 end, since = time.time() + timeout, None
@@ -457,10 +473,19 @@ class TeachServer:
             angle = math.radians(float(step.get('rotate_deg', 0.0)))
             if abs(angle) > 1e-4:
                 p, q = self.current_target()
+                with self.lock:
+                    yaw0 = tc.yaw_of(self.pose[1])
                 rate = math.radians(float(step.get('rot_speed_deg', 30.0)))
-                self.publish_speed(rate / MAX_ANGULAR_VELOCITY)
+                self.publish_speed(min(1.0, rate / MAX_ANGULAR_VELOCITY))
                 self.send_target(p, tc.quat_mul(tc.quat_z(angle), q))
-                wait(lambda st: st[1] < REACHED_ANGLE and st[3] < 1e-3, 60.0, 'rotating')
+                wait(lambda st: st[1] < REACHED_ANGLE and st[3] < 1e-3,
+                     abs(angle) / min(rate, MAX_ANGULAR_VELOCITY) + 10.0, 'rotating')
+                time.sleep(0.2)
+                with self.lock:
+                    turned = tc.wrap(tc.yaw_of(self.pose[1]) - yaw0)
+                if abs(turned) < 0.8 * abs(angle):  # friction held the gripper back
+                    self.notes.append(f'turned only {math.degrees(abs(turned)):.0f}° of '
+                                      f'{math.degrees(abs(angle)):.0f}° while pressing')
             hold = float(step.get('hold_s', 0.0))
             if hold > 0:
                 end = time.time() + hold
@@ -470,17 +495,74 @@ class TeachServer:
             self.link.send('force 0')
             time.sleep(0.2)
 
+    @staticmethod
+    def time_path(points, speed):
+        """Sample a joint trajectory every 10 ms through points [(joints, xyz), ...] with the
+        fastest joint and the Cartesian speed limited and smooth ramps at both ends."""
+        speed = min(1.0, max(0.01, speed))
+        seg = []  # time each segment needs at full speed
+        for (q0, p0), (q1, p1) in zip(points, points[1:]):
+            seg.append(max(max(abs(a - b) for a, b in zip(q0, q1)) / (J_VEL * speed),
+                           math.dist(p0, p1) / (C_VEL * speed), 1e-6))
+        total = sum(seg)
+        acc, dt = 1.0 / RAMP_TIME, 0.01
+        out, u, v, k, start = [list(points[0][0])], 0.0, 0.0, 0, 0.0
+        while u < total:
+            # normalized speed: ramp up, cruise, brake so that it ends exactly at the last point
+            v = min(1.0, v + acc * dt, math.sqrt(2 * acc * max(total - u, 0.0)) + acc * dt)
+            u = min(total, u + v * dt)
+            while k < len(seg) - 1 and u > start + seg[k]:
+                start += seg[k]
+                k += 1
+            f = min(1.0, (u - start) / seg[k])
+            out.append([a + f * (b - a) for a, b in zip(points[k][0], points[k + 1][0])])
+        return out
+
+    def run_path(self, group, default_speed, tare, max_force):
+        """Play a group of planned pose steps as one smooth joint trajectory."""
+        self.ensure_motion('jfollow')
+        with self.lock:
+            start = list(self.joints)
+        points = [(start, list(kin.fk(start)[:3, 3]))] + [(g['jq'], g['p']) for g in group]
+        path = self.time_path(points, group[-1].get('speed') or default_speed)
+        if len(path) < 2:
+            return
+        self.publish_speed(1.0)  # the timing is in the trajectory; 1 = play it as planned
+        self.link.send('jpath_begin')
+        for i in range(0, len(path), 40):
+            self.link.send('jpath ' + ' '.join(f'{v:.6f}' for q in path[i:i + 40] for v in q))
+        self.link.send('jpath_end')
+        time.sleep(0.1)
+        end = time.time() + len(path) * 0.01 * 3 + 10.0
+        while True:
+            self.check(tare, max_force)
+            with self.lock:
+                st = self.follower_status
+            if st is not None and st[0] < REACHED_DIST and st[2] < 1e-3:
+                return
+            if time.time() > end:
+                raise Aborted('timeout waiting for motion')
+            time.sleep(0.01)
+
     def execute(self, steps, default_speed, max_force, tare):
         info = self.job_info
-        info['steps'] = len(steps)
-        for i, s in enumerate(steps):
-            info.update(step=i + 1, message=f'step {i + 1}/{len(steps)}: {s["type"]}')
-            if s['type'] == 'pose' and s.get('cartesian'):
+        info['steps'] = sum(1 for s in steps if not s.get('dense'))
+        group, n = [], 0
+        for s in steps:
+            if not s.get('dense'):
+                n += 1
+                info.update(step=n, message=f'step {n}/{info["steps"]}: {s["type"]}')
+            if s['type'] == 'pose' and not s.get('cartesian'):
+                group.append(s)
+                if not s.get('blend'):  # a stop point ends a trajectory
+                    self.run_path(group, default_speed, tare, max_force)
+                    group = []
+                continue
+            if group:
+                self.run_path(group, default_speed, tare, max_force)
+                group = []
+            if s['type'] == 'pose':  # Cartesian: the short segment from a contact point
                 self.send_target(s['p'], s['q'])
-                self.publish_speed(s.get('speed', default_speed))
-                self.wait_reached(s.get('blend', False), tare, max_force)
-            elif s['type'] == 'pose':
-                self.send_joint_target(s['jq'])
                 self.publish_speed(s.get('speed', default_speed))
                 self.wait_reached(s.get('blend', False), tare, max_force)
             elif s['type'] == 'wait':
@@ -495,9 +577,8 @@ class TeachServer:
                 self.ensure_motion('follow')
                 self.publish_speed(default_speed)
                 self.press(s, tare)
-        last = next((s for s in reversed(steps) if s['type'] == 'pose'), None)
-        if last is not None and last.get('blend'):
-            self.wait_reached(False, tare, max_force)
+        if group:
+            self.run_path(group, default_speed, tare, max_force)
 
     def plan_joints(self, steps):
         """Joint angles for every pose step (IK seeded with the recorded configuration), all
@@ -584,6 +665,7 @@ class TeachServer:
 
         def run():
             self.job_info.update(running=True, label=label, step=0, message='starting')
+            self.notes = []
             try:
                 time.sleep(0.2)
                 with self.lock:
@@ -591,7 +673,7 @@ class TeachServer:
                 self.execute(steps, default_speed, max_force, tare)
                 if on_success:
                     on_success()
-                self.job_info['message'] = 'done'
+                self.job_info['message'] = 'done' + (f' - {"; ".join(self.notes)}' if self.notes else '')
             except Exception as e:  # noqa: BLE001
                 self.stop_motion()
                 self.job_info['message'] = f'aborted: {e}'
@@ -769,8 +851,8 @@ class TeachServer:
             self.record_stop_point()  # replay starts the press where the measurement started
             target, dt = 1.0, 0.05
             time.sleep(0.2)  # settle: the controller tares the force when force mode starts
-            self.link.send('force 1 {} {} {} {} {} {}'.format(
-                target, gain, v_approach, v_contact, step['max_depth'], MEASURE_ABORT))
+            self.link.send('force 1 {} {} {} {} {} {} {}'.format(
+                target, gain, v_approach, v_contact, step['max_depth'], MEASURE_ABORT, step['max_travel']))
             time.sleep(0.2)
             while True:
                 with self.lock:
@@ -798,8 +880,8 @@ class TeachServer:
                         self.measure['message'] = f'reached {MEASURE_MAX:.0f} N - take it or cancel'
                     else:
                         target = min(MEASURE_MAX, target + MEASURE_RATE * dt)
-                        self.link.send('force 1 {} {} {} {} {} {}'.format(
-                            target, gain, v_approach, v_contact, step['max_depth'], MEASURE_ABORT))
+                        self.link.send('force 1 {} {} {} {} {} {} {}'.format(
+                            target, gain, v_approach, v_contact, step['max_depth'], MEASURE_ABORT, step['max_travel']))
                 time.sleep(dt)
         except Aborted as e:
             self.measure['message'] = f'measuring stopped: {e}'
@@ -1042,7 +1124,7 @@ def make_app(node):
             clearance = min(0.05, max(0.002, float(b.get('clearance', 0.01))))
             steps[i] = {**steps[i], 'p': [steps[i]['p'][0], steps[i]['p'][1], steps[i]['p'][2] + clearance],
                         'blend': False}
-            steps.insert(i + 1, press_step({**b, 'max_depth': clearance + float(b.get('extra_depth', 0.02))}))
+            steps.insert(i + 1, press_step({'rotate_deg': 0, **b, 'max_depth': clearance + 0.02}))
         elif op == 'set' and steps[i]['type'] == 'press':
             steps[i] = press_step({**steps[i], **b})
         elif op == 'set':

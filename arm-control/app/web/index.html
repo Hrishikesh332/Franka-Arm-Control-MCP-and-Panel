@@ -161,16 +161,18 @@
           <input id="pForceSlider" type="range" min="1" max="40" step="0.5" value="10" class="grow">
           <input id="pForce" type="number" value="10" step="0.5" min="0.5" max="50" style="width:80px"> N
           <button id="recPress"></button></div></div></div>
-      <details><summary>More options: rotate while pressing, hold, search distance</summary>
-        <div class="row">
-          <label>rotate <input id="pRot" type="number" value="0" step="15"> °</label>
-          <label>at <input id="pRotV" type="number" value="30" step="5" min="1" max="90"> °/s</label>
-          <label>then hold <input id="pHold" type="number" value="0.5" step="0.5" min="0"> s</label>
-          <label>search up to <input id="pDepth" type="number" value="20" step="5" min="1" max="100"> mm below</label>
-        </div>
-        <p class="muted">Rotation starts once the force is reached and keeps the force. "Search up to" covers the gap
-          to the object plus how far it gives way; the press stops if the force is not reached within it.</p>
-      </details>
+      <div class="row">
+        <label>rotate while pressing <input id="pRot" type="number" value="30" step="5"> °</label>
+        <label>at <input id="pRotV" type="number" value="30" step="5" min="2" max="34"> °/s</label>
+        <label>then hold <input id="pHold" type="number" value="0.5" step="0.5" min="0"> s</label>
+      </div>
+      <div class="row">
+        <label>look for the object up to <input id="pDepth" type="number" value="30" step="5" min="2" max="100"> mm below</label>
+        <label>go up to <input id="pTravel" type="number" value="30" step="5" min="2" max="100"> mm into it</label>
+      </div>
+      <p class="muted">Rotation starts once the force is reached and keeps the force (0 = no rotation; at most 34 °/s).
+        The press stops if nothing is touched within the search distance, or if the force is not reached within
+        the distance into the object.</p>
       <p id="pSummary"></p>
       <p class="muted" id="measureMsg"></p>
     </div>
@@ -532,7 +534,7 @@ function renderPositions() {
 function stepText(s, i) {
   if (s.type === 'pose') return `${i === 0 ? 'start ' : ''}${s.blend ? 'pass' : 'stop'} at <span class="num">${mm(s.p[0])}, ${mm(s.p[1])}, z ${mm(s.p[2])}</span>`;
   if (s.type === 'wait') return `wait ${s.s} s`;
-  if (s.type === 'press') return `press ${s.force} N (${s.contact})${s.rotate_deg ? `, rotate ${s.rotate_deg}° at ${s.rot_speed_deg}°/s` : ''}${s.hold_s ? `, hold ${s.hold_s} s` : ''}, max depth ${mm(s.max_depth)} mm`;
+  if (s.type === 'press') return `press ${s.force} N (${s.contact})${s.rotate_deg ? `, rotate ${s.rotate_deg}° at ${s.rot_speed_deg}°/s` : ''}${s.hold_s ? `, hold ${s.hold_s} s` : ''}, search ${mm(s.max_depth)} mm, ${mm(s.max_travel || 0.03)} mm into it`;
   if (s.type === 'guarded') return `guarded move (${s.dir.map(v => v.toFixed(1)).join(', ')}) up to ${mm(s.dist)} mm until ${s.force} N`;
   return s.type;
 }
@@ -692,11 +694,11 @@ document.addEventListener('click', async (e) => {
       Object.assign(body, { force: Number(force), contact: contact || 'hard', clearance: Number(above || 10) / 1000 });
     }
     if (d.ed === 'insert_press' || d.ed === 'set_press') {
-      const v = prompt('Press: force N, springy|hard, rotate °, rotation speed °/s, hold s, max depth mm', '10 springy 0 30 0.5 30');
+      const v = prompt('Press: force N, springy|hard, rotate °, rotation speed °/s, hold s, search mm, into the object mm', '10 springy 30 30 0.5 30 30');
       if (v === null) return;
-      const [force, contact, rot, rotv, hold, depth] = v.trim().split(/\s+/);
+      const [force, contact, rot, rotv, hold, depth, travel] = v.trim().split(/\s+/);
       Object.assign(body, { force: Number(force), contact, rotate_deg: Number(rot), rot_speed_deg: Number(rotv),
-                            hold_s: Number(hold), max_depth: Number(depth) / 1000 });
+                            hold_s: Number(hold), max_depth: Number(depth) / 1000, max_travel: Number(travel || 30) / 1000 });
       if (d.ed === 'set_press') body.op = 'set';
     }
     await api(`/api/grippers/${enc(gname)}/${d.k}/edit`, body); renderSeqCards();
@@ -727,10 +729,11 @@ document.querySelectorAll('[data-pjog]').forEach(c => c.onclick = () =>
 $('pToControl').onclick = () => api('/api/mode', { mode: 'control' });
 $('pForceSlider').oninput = () => { $('pForce').value = $('pForceSlider').value; renderState(); };
 $('pForce').oninput = () => { $('pForceSlider').value = $('pForce').value; renderState(); };
-['pRot', 'pRotV', 'pHold', 'pDepth'].forEach(id => $(id).oninput = () => renderState());
+['pRot', 'pRotV', 'pHold', 'pDepth', 'pTravel'].forEach(id => $(id).oninput = () => renderState());
 const pressParams = () => ({
   force: Number($('pForce').value), contact: pressContact, rotate_deg: Number($('pRot').value),
-  rot_speed_deg: Number($('pRotV').value), hold_s: Number($('pHold').value), max_depth: $('pDepth').value / 1000 });
+  rot_speed_deg: Number($('pRotV').value), hold_s: Number($('pHold').value), max_depth: $('pDepth').value / 1000,
+  max_travel: $('pTravel').value / 1000 });
 $('recPress').onclick = async () => { await api('/api/record/press', pressParams()); $('pressPanel').hidden = true; };
 $('measureStart').onclick = () => api('/api/record/measure', { action: 'start', ...pressParams() });
 $('measureTake').onclick = async () => { await api('/api/record/measure', { action: 'take' }); };
@@ -763,7 +766,7 @@ function renderPressPanel(s, control) {
   $('pSummary').innerHTML = `<b>Recorded as:</b> press down onto the ${pressContact === 'hard' ? 'hard surface' : 'springy part'}
     until <b>${m.running ? 'the measured force' : Number($('pForce').value).toFixed(1) + ' N'}</b>`
     + (rot ? `, then rotate <b>${rot}°</b> at ${$('pRotV').value}°/s` : '')
-    + (hold ? `, hold ${hold} s` : '') + `, searching up to ${$('pDepth').value} mm below the start.`;
+    + (hold ? `, hold ${hold} s` : '') + `; look for the object up to ${$('pDepth').value} mm below the start and go at most ${$('pTravel').value} mm into it.`;
 }
 
 // grippers

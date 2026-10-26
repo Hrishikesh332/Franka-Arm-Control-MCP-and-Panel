@@ -63,7 +63,7 @@ constexpr double kForceAcceleration = 0.1;        // m/s^2, vertical acceleratio
 // Free drive: joint damping (Nm*s/rad), torque rate and magnitude limits.
 constexpr std::array<double, 7> kDamping{{2.0, 2.0, 2.0, 2.0, 1.0, 1.0, 0.5}};
 constexpr double kMaxTorqueRate = 500.0;          // Nm/s
-constexpr double kMaxDampingTorque = 15.0;        // Nm
+constexpr double kMaxDampingTorque = 10.0;        // Nm
 // The FR3's joint velocity limits depend on the joint position and drop to zero at the ends of
 // the range. Above this fraction of the current limit, follow mode slows down and free drive
 // damps harder, so neither runs into a joint_velocity_violation reflex.
@@ -72,8 +72,9 @@ constexpr double kAutoRecoverDelay = 0.5;         // s after a reflex before cle
 // Soft joint limits: at the end of a joint's range its allowed velocity is zero, and any motion
 // there trips joint_velocity_violation (the arm can even get stuck). Free drive pushes back with a
 // spring this far before the end; follow mode stops when a joint gets this close and keeps going.
-constexpr double kFreeWallMargin = 0.25;          // rad
-constexpr double kFreeWallStiffness = 20.0;       // Nm/rad
+constexpr double kFreeWallMargin = 0.12;          // rad - narrow, so free drive feels free
+constexpr double kFreeWallStiffness = 10.0;       // Nm/rad
+constexpr double kFreeDampingSoftLimit = 0.75;    // extra damping only close to the velocity limit
 constexpr double kFollowStopMargin = 0.15;        // rad
 // Home: Franka's ready pose, far from all joint limits; reached with a cosine profile whose peak
 // joint speed is kHomeSpeed. A stop request slows the motion down to standstill smoothly.
@@ -85,9 +86,11 @@ constexpr double kHomeStopTime = 0.5;             // s to slow down to standstil
 constexpr double kJointMaxVelocity = 1.0;         // rad/s
 constexpr double kJointMaxAcceleration = 2.0;     // rad/s^2
 constexpr double kJointTargetMargin = 0.1;        // rad, targets are clamped this far inside the ranges
+constexpr double kPathDt = 0.01;                  // s between the samples of a joint trajectory
+constexpr double kPathStopTime = 0.3;             // s to slow a trajectory down to standstill
 
 enum class Mode { kIdle, kFollow, kFree, kHome, kJointFollow };
-enum ForceFault { kNoFault = 0, kAbortForce = 1, kMaxDepth = 2 };
+enum ForceFault { kNoFault = 0, kAbortForce = 1, kMaxTravel = 2, kNoContact = 3 };
 
 const char* mode_name(Mode m) {
   return m == Mode::kFollow ? "follow" : m == Mode::kFree ? "free" : m == Mode::kHome ? "home"
@@ -163,6 +166,7 @@ Eigen::Vector3d clamp_norm(const Eigen::Vector3d& v, double max_norm) {
 struct ForceCommand {
   bool enable{false};
   double force{0}, gain{0}, approach_speed{0}, contact_speed{0}, max_depth{0}, abort_force{0};
+  double max_travel{0.03};  // how far it may go into the object after contact (max_depth: search)
 };
 
 // Everything shared between the realtime loop and the communication thread.
@@ -172,6 +176,9 @@ struct Shared {
   uint64_t target_seq{0};
   uint64_t jtarget_seq{0};
   std::array<double, 7> jtarget{};
+  // joint trajectory sampled every kPathDt, built by the comm thread and swapped into the loop
+  std::vector<std::array<double, 7>> path_building, path_ready;
+  uint64_t path_seq{0};
   Eigen::Vector3d target_p{Eigen::Vector3d::Zero()};
   Eigen::Quaterniond target_q{Eigen::Quaterniond::Identity()};
   uint64_t force_seq{0};
@@ -261,13 +268,18 @@ class Follower {
       v_des = e / dist * std::min(kMaxLinearVelocity * scale, std::sqrt(2.0 * kMaxLinearAcceleration * dist));
     }
     if (force_.enable) {
-      force_touched_ = force_touched_ || contact_ > std::min(2.0, 0.3 * force_.force);
+      if (!force_touched_ && contact_ > std::min(2.0, 0.3 * force_.force)) {
+        force_touched_ = true;
+        force_contact_z_ = p_ref_.z();
+      }
       const double limit = force_touched_ ? force_.contact_speed : force_.approach_speed;
       v_des.z() = -std::clamp(force_.gain * (force_.force - contact_), -limit, limit);
       if (contact_ > force_.abort_force) {
         fault_ = kAbortForce;
-      } else if (force_start_z_ - p_ref_.z() > force_.max_depth && v_des.z() < 0.0) {
-        fault_ = kMaxDepth;
+      } else if (!force_touched_ && force_start_z_ - p_ref_.z() > force_.max_depth && v_des.z() < 0.0) {
+        fault_ = kNoContact;   // searched the whole distance without touching anything
+      } else if (force_touched_ && force_contact_z_ - p_ref_.z() > force_.max_travel && v_des.z() < 0.0) {
+        fault_ = kMaxTravel;   // pressed this far into the object without reaching the force
       }
       if (fault_ != kNoFault) {
         leave_force_mode();
@@ -355,7 +367,7 @@ class Follower {
   double v_cmd_{0}, w_cmd_{0};
   bool holding_{false};
   ForceCommand force_;
-  double force_filtered_{0}, force_tare_{0}, force_start_z_{0}, contact_{0};
+  double force_filtered_{0}, force_tare_{0}, force_start_z_{0}, force_contact_z_{0}, contact_{0};
   bool force_touched_{false};
   ForceFault fault_{kNoFault};
 };
@@ -437,6 +449,22 @@ void handle_command(Shared& shared, const std::string& line) {
       std::lock_guard<std::mutex> state_lock(shared.state_mutex);
       shared.last_error.clear();
     }
+  } else if (cmd == "jpath_begin") {
+    shared.path_building.clear();
+  } else if (cmd == "jpath") {  // any number of 7-value points
+    std::array<double, 7> q{};
+    while (true) {
+      for (double& x : q) in >> x;
+      if (!in) break;
+      for (size_t i = 0; i < 7; i++) {
+        q[i] = std::clamp(q[i], kJointMin[i] + kJointTargetMargin, kJointMax[i] - kJointTargetMargin);
+      }
+      shared.path_building.push_back(q);
+    }
+  } else if (cmd == "jpath_end") {
+    shared.path_ready.swap(shared.path_building);  // allocation stays in this thread
+    shared.path_building.clear();
+    shared.path_seq++;
   } else if (cmd == "jtarget") {
     std::array<double, 7> q{};
     for (double& x : q) in >> x;
@@ -468,6 +496,8 @@ void handle_command(Shared& shared, const std::string& line) {
     if (f.enable) {
       in >> f.force >> f.gain >> f.approach_speed >> f.contact_speed >> f.max_depth >> f.abort_force;
       if (!in) return;
+      double travel;
+      if (in >> travel) f.max_travel = std::clamp(travel, 0.0, 0.1);
       f.force = std::clamp(f.force, 0.0, 60.0);
       f.gain = std::clamp(f.gain, 0.0, 0.01);
       f.approach_speed = std::clamp(f.approach_speed, 0.0, 0.05);
@@ -498,7 +528,7 @@ void communication_thread(Shared& shared) {
   sockaddr_in dest = addr;
   dest.sin_port = htons(kStatePort);
   auto next_state = std::chrono::steady_clock::now();
-  char buf[1024];
+  static char buf[65536];  // trajectory chunks are several kB
   while (shared.running) {
     pollfd pfd{rx, POLLIN, 0};
     const int timeout_ms = std::max<int>(0, std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -646,10 +676,15 @@ void run_joint_follow(franka::Robot& robot, Shared& shared) {
   Vec7 q_ref, q_f1, q_cmd, q_target, v = Vec7::Zero();
   bool first = true, leaving = false, holding = false;
   double governor = 1.0;
-  uint64_t seq;
+  uint64_t seq, path_seq;
+  std::vector<std::array<double, 7>> path;  // the trajectory being played (swapped in, no alloc)
+  path.reserve(1);
+  double path_t = 0.0, path_rate = 1.0;
+  bool path_active = false, path_stopping = false;
   {
     std::lock_guard<std::mutex> lock(shared.mutex);
-    seq = shared.jtarget_seq;  // ignore targets sent before this mode started
+    seq = shared.jtarget_seq;  // ignore targets / paths sent before this mode started
+    path_seq = shared.path_seq;
   }
   shared.stop_requested = false;
   robot.control([&](const franka::RobotState& state, franka::Duration period) -> franka::JointPositions {
@@ -670,17 +705,34 @@ void run_joint_follow(franka::Robot& robot, Shared& shared) {
           seq = shared.jtarget_seq;
           q_target = Eigen::Map<const Vec7>(shared.jtarget.data());
           holding = false;
+          path_active = false;
           shared.joint_warning = 0;
+        }
+        if (shared.path_seq != path_seq) {
+          path_seq = shared.path_seq;
+          path.swap(shared.path_ready);  // O(1); the comm thread frees the old buffer later
+          // a trajectory must start where we are (the server plans it from here)
+          if (!path.empty() &&
+              (Eigen::Map<const Vec7>(path.front().data()) - q_ref).cwiseAbs().maxCoeff() < 0.02) {
+            path_active = true;
+            path_stopping = false;
+            path_t = 0.0;
+            path_rate = 1.0;
+            holding = false;
+            shared.joint_warning = 0;
+          }
         }
         leaving = leaving || shared.requested_mode != Mode::kJointFollow || !shared.running;
       }
     }
-    if (shared.stop_requested.exchange(false) || leaving) {
-      holding = true;
+    const bool stop_now = shared.stop_requested.exchange(false) || leaving;
+    const int near_limit = joint_approaching_limit(state, kFollowStopMargin);
+    if (near_limit) {
+      shared.joint_warning = near_limit;
     }
-    if (const int joint = joint_approaching_limit(state, kFollowStopMargin)) {
+    if (stop_now || near_limit) {
       holding = true;
-      shared.joint_warning = joint;
+      path_stopping = true;
     }
     const double dt = period.toSec() > 0.0 ? std::clamp(period.toSec(), 0.0005, 0.005) : 0.001;
     const auto ratios = joint_speed_ratios(state.q, state.dq);
@@ -689,11 +741,30 @@ void run_joint_follow(franka::Robot& robot, Shared& shared) {
     governor += (wanted < governor ? 0.2 : 0.01) * (wanted - governor);
     const double vmax = kJointMaxVelocity * shared.speed.load() * governor;
 
+    if (path_active) {
+      // play the trajectory; slowing the playback rate down keeps every derivative continuous
+      const double wanted_rate = path_stopping ? 0.0 : std::min(1.0, governor);
+      path_rate += std::clamp(wanted_rate - path_rate, -dt / kPathStopTime, dt / kPathStopTime);
+      path_t += path_rate * dt;
+      const double last = static_cast<double>(path.size() - 1);
+      const double x = std::min(path_t / kPathDt, last);
+      const size_t i0 = static_cast<size_t>(x);
+      const size_t i1 = std::min(i0 + 1, path.size() - 1);
+      const double f = x - static_cast<double>(i0);
+      q_ref = (1.0 - f) * Eigen::Map<const Vec7>(path[i0].data()) + f * Eigen::Map<const Vec7>(path[i1].data());
+      v.setZero();
+      if (x >= last || (path_stopping && path_rate <= 0.0)) {
+        path_active = false;
+        q_target = q_ref;
+      } else {
+        q_target = Eigen::Map<const Vec7>(path.back().data());
+      }
+    }
     // planner: straight line in joint space, the fastest joint bounded (infinity norm)
     const Vec7 e = q_target - q_ref;
     const double dist = e.cwiseAbs().maxCoeff();
     Vec7 v_des = Vec7::Zero();
-    if (!holding && dist > 1e-7) {
+    if (!holding && !path_active && dist > 1e-7) {
       v_des = e / dist * std::min(vmax, std::sqrt(2.0 * kJointMaxAcceleration * dist));
     }
     Vec7 dv = v_des - v;
@@ -701,9 +772,11 @@ void run_joint_follow(franka::Robot& robot, Shared& shared) {
     if (dv_max > kJointMaxAcceleration * dt) {
       dv *= kJointMaxAcceleration * dt / dv_max;
     }
-    v += dv;
-    q_ref += v * dt;
-    if (!holding && dist < 1e-5 && v.cwiseAbs().maxCoeff() < 2.0 * kJointMaxAcceleration * dt) {
+    if (!path_active) {
+      v += dv;
+      q_ref += v * dt;
+    }
+    if (!path_active && !holding && dist < 1e-5 && v.cwiseAbs().maxCoeff() < 2.0 * kJointMaxAcceleration * dt) {
       q_ref = q_target;
       v.setZero();
     }
@@ -715,7 +788,9 @@ void run_joint_follow(franka::Robot& robot, Shared& shared) {
     const double a = std::min(1.0, dt / kSmoothingTime);
     q_f1 += a * (q_ref - q_f1);
     q_cmd += a * (q_f1 - q_cmd);
-    const double remaining = (q_target - q_cmd).cwiseAbs().maxCoeff();
+    // "remaining": time left on the trajectory plus the distance still to the target
+    const double remaining = (path_active ? (path.size() - 1) * kPathDt - path_t : 0.0) +
+                             (q_target - q_cmd).cwiseAbs().maxCoeff();
     const double speed = ((q_cmd - q_prev) / dt).cwiseAbs().maxCoeff();
     store_state(shared, Mode::kJointFollow, state, {remaining, 0.0, speed, 0.0, 1.0, 0.0, 0.0, 0.0});
 
@@ -789,9 +864,9 @@ void run_free(franka::Robot& robot, Shared& shared) {
     bool zero = true;
     const auto ratios = joint_speed_ratios(state.q, state.dq);
     for (size_t i = 0; i < 7; i++) {
-      // damping rises steeply once a joint uses more than half of its current velocity limit
-      const double excess = std::max(0.0, ratios[i] - kJointSpeedSoftLimit) / (1.0 - kJointSpeedSoftLimit);
-      const double damping = kDamping[i] * (1.0 + 20.0 * excess);
+      // extra damping only when a joint gets close to its current velocity limit
+      const double excess = std::max(0.0, ratios[i] - kFreeDampingSoftLimit) / (1.0 - kFreeDampingSoftLimit);
+      const double damping = kDamping[i] * (1.0 + 8.0 * excess);
       // soft wall before the ends of the range: a spring pushing back towards the middle
       double wall = 0.0;
       if (state.q[i] > kJointMax[i] - kFreeWallMargin) {

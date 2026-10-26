@@ -65,6 +65,7 @@ class SimRobot:
         self.jtarget = None
         self.joints_stale = False
         self.path, self.path_building, self.path_t = None, [], 0.0
+        self.bottoming = False  # like an iris mechanism: springy for 5 mm, then rigid
         self.target = None
         self.scale = 0.3
         self.active = False
@@ -75,6 +76,12 @@ class SimRobot:
         self.max_press = 0.0
         self.load = None
         threading.Thread(target=self.loop, daemon=True).start()
+
+    def contact_force(self):
+        pen = max(0.0, TABLE_Z - self.p[2])
+        if self.bottoming:
+            return TABLE_K * min(pen, 0.005) + 200000.0 * max(0.0, pen - 0.005)
+        return TABLE_K * pen
 
     def link(self, on_state):
         """RobotLink replacement handed to TeachServer."""
@@ -129,6 +136,8 @@ class SimRobot:
                                   'z0': self.p[2], 'touched': False, 'fault': 0,
                                   'tare': TABLE_K * max(0.0, TABLE_Z - self.p[2])}
                 elif d[0] and self.force is not None:
+                    if d[1] != self.force['F']:
+                        self.force['hold'] = False
                     self.force['F'] = d[1]  # target changed while pressing (like the controller)
                 elif not d[0]:
                     self.force = None
@@ -150,7 +159,7 @@ class SimRobot:
             time.sleep(dt)
             with self.lock:
                 v, w, ang, fm = 0.0, 0.0, 0.0, self.force
-                contact = TABLE_K * max(0.0, TABLE_Z - self.p[2])
+                contact = self.contact_force()
                 if self.active and self.rt_mode == 'jfollow' and self.path is not None:
                     # trajectory playback like franka_teach_rt (samples every 10 ms)
                     self.path_t += dt
@@ -198,7 +207,12 @@ class SimRobot:
                     if not fm['touched'] and c > min(2.0, 0.3 * fm['F']):
                         fm['touched'], fm['zc'] = True, self.p[2]
                     lim = fm['vc'] if fm['touched'] else fm['va']
-                    vz = -max(-lim, min(lim, fm['gain'] * (fm['F'] - c)))
+                    err = fm['F'] - c
+                    if not fm.get('hold') and abs(err) < max(0.5, 0.05 * fm['F']):
+                        fm['hold'] = True     # like franka_teach_rt: reached -> hold the height
+                    elif fm.get('hold') and abs(err) > 0.3 * fm['F']:
+                        fm['hold'] = False
+                    vz = 0.0 if fm.get('hold') else -max(-lim, min(lim, fm['gain'] * err))
                     if c > fm['abort']:
                         fm['fault'] = 1
                     elif not fm['touched'] and fm['z0'] - self.p[2] > fm['depth'] and vz < 0:
@@ -211,12 +225,12 @@ class SimRobot:
                     else:
                         self.p[2] += vz * dt
                         self.max_press = max(self.max_press, c)
-                contact = TABLE_K * max(0.0, TABLE_Z - self.p[2])
+                contact = self.contact_force()
                 self.min_z_seen = min(self.min_z_seen, self.p[2])
                 self.trace.append(list(self.p))
                 fz = contact
                 p, q, active = list(self.p), list(self.q), self.active
-                fstat = [1.0 if self.force else 0.0,
+                fstat = [(2.0 if self.force.get('hold') else 1.0) if self.force else 0.0,
                          (contact - fm['tare']) if fm else 0.0, float(self.force_fault)]
             with self.lock:
                 if self.joints_stale:  # Cartesian motion / hand guiding: joints from IK
@@ -474,6 +488,22 @@ def main():
     moved = max((abs(a - b) for t in sim.trace for a, b in zip(t, sim.trace[0])), default=0.0)
     assert r['ok'] is False and 'not reachable' in r['error'] and moved < 1e-6, (r, moved)
     print('unreachable refused before moving:', r['error'][:90])
+
+    # press on a part that bottoms out (springy, then rigid): reach the force and hold, no oscillation
+    api('/api/mode', {'mode': 'guide'})
+    sim.hand_guide([0.5, 0.0, 0.20])
+    api('/api/record/start', {'gripper': 'hook', 'kind': 'place', 'speed': 0.5})
+    sim.hand_guide([0.5, 0.0, TABLE_Z + 0.005]); api('/api/record/waypoint', {})
+    api('/api/record/press', {'force': 19, 'contact': 'springy', 'rotate_deg': 30, 'rot_speed_deg': 30})
+    sim.hand_guide([0.5, 0.0, 0.20])
+    api('/api/record/finish', {})
+    sim.bottoming, sim.max_press = True, 0.0
+    api('/api/settings', {'max_force': 25.0})
+    api('/api/grippers/hook/place/test', method='POST')
+    msg = wait_job()
+    sim.bottoming = False
+    assert msg.startswith('done') and 17 < sim.max_press < 25, (msg, sim.max_press)
+    print(f'press on a bottoming part ok: peak {sim.max_press:.1f} N for 19 N ({msg})')
 
     # homing: joint motion to the ready pose, ends in Hold
     api('/api/home', method='POST')

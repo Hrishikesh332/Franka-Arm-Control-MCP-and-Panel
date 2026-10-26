@@ -238,10 +238,14 @@ class Follower {
       force_tare_ = std::isnan(force_filtered_) ? 0.0 : force_filtered_;  // starts in free air
       force_start_z_ = p_ref_.z();
       force_touched_ = false;
+      force_holding_ = false;
       fault_ = kNoFault;
     } else if (!cmd.enable && force_.enable) {
       leave_force_mode();
     } else if (cmd.enable) {
+      if (cmd.force != force_.force) {
+        force_holding_ = false;  // new target (e.g. while measuring): regulate towards it again
+      }
       force_.force = cmd.force;
     }
   }
@@ -273,7 +277,16 @@ class Follower {
         force_contact_z_ = p_ref_.z();
       }
       const double limit = force_touched_ ? force_.contact_speed : force_.approach_speed;
-      v_des.z() = -std::clamp(force_.gain * (force_.force - contact_), -limit, limit);
+      const double error = force_.force - contact_;
+      // Once the force is reached, hold the height instead of regulating on: continuous
+      // regulation oscillates on stiff objects (and parts that bottom out). Only correct again,
+      // slowly, if the force drifts far away (hysteresis).
+      if (!force_holding_ && std::abs(error) < std::max(0.5, 0.05 * force_.force)) {
+        force_holding_ = true;
+      } else if (force_holding_ && std::abs(error) > 0.3 * force_.force) {
+        force_holding_ = false;
+      }
+      v_des.z() = force_holding_ ? 0.0 : -std::clamp(force_.gain * error, -limit, limit);
       if (contact_ > force_.abort_force) {
         fault_ = kAbortForce;
       } else if (!force_touched_ && force_start_z_ - p_ref_.z() > force_.max_depth && v_des.z() < 0.0) {
@@ -353,7 +366,7 @@ class Follower {
       remaining.z() = 0.0;
     }
     return {remaining.norm(), q_target_.angularDistance(q_cmd_), v_cmd_, w_cmd_, 1.0,
-            force_.enable ? 1.0 : 0.0, contact_, static_cast<double>(fault_)};
+            force_.enable ? (force_holding_ ? 2.0 : 1.0) : 0.0, contact_, static_cast<double>(fault_)};
   }
 
  private:
@@ -369,6 +382,7 @@ class Follower {
   ForceCommand force_;
   double force_filtered_{0}, force_tare_{0}, force_start_z_{0}, force_contact_z_{0}, contact_{0};
   bool force_touched_{false};
+  bool force_holding_{false};  // force reached: holding the height
   ForceFault fault_{kNoFault};
 };
 

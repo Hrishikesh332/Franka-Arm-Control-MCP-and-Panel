@@ -468,8 +468,8 @@ class TeachServer:
                         raise Aborted(f'press: timeout while {what}')
                     time.sleep(0.01)
 
-            tol = max(1.0, 0.1 * force)
-            wait(lambda st: abs(st[6] - force) < tol, 30.0, 'building up the force')
+            # franka_teach_rt reports 2 once the force is reached and it holds the height there
+            wait(lambda st: st[5] == 2, 60.0, 'building up the force')
             angle = math.radians(float(step.get('rotate_deg', 0.0)))
             if abs(angle) > 1e-4:
                 p, q = self.current_target()

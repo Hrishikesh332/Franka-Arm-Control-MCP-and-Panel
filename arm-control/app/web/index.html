@@ -101,9 +101,11 @@
 </nav>
 <main>
   <div id="recbar" class="recbar" hidden>
-    <div class="row"><strong id="recTitle"></strong><span class="muted" id="recCount"></span></div>
+    <div class="row"><strong id="recTitle"></strong><span class="muted" id="recCount"></span>
+      <span class="spacer"></span>
+      <button id="recContToggle" title="Record the path while you move the arm (every 5 mm / 3°)"></button></div>
     <div class="row">
-      <button id="recWp" class="primary">Add waypoint</button>
+      <button id="recWp" class="primary">Add stop point</button>
       <button id="recWait">Add 1 s wait</button>
       <span class="muted">Guarded move</span>
       <select id="gAxis"><option>-z</option><option>+z</option><option>+x</option><option>-x</option><option>+y</option><option>-y</option></select>
@@ -372,10 +374,13 @@ function renderState() {
   $('recbar').hidden = !rec;
   if (rec) {
     $('recTitle').textContent = `Recording ${rec.kind} sequence of "${rec.gripper}"`;
-    $('recCount').textContent = `${rec.steps} steps${rec.continuous ? ' · continuous' : ''}`;
+    $('recCount').textContent = `${rec.steps} steps · ${rec.stops} stop points`
+      + (rec.paused ? ' · paused while the press / guarded move runs' : '');
+    $('recContToggle').textContent = rec.continuous ? '● Recording path — pause' : '○ Path paused — record path';
+    $('recContToggle').classList.toggle('on', rec.continuous);
     $('recHint').textContent = control
       ? 'Control mode: jog between waypoints; guarded moves and presses run immediately. Start a press a few cm above the contact.'
-      : 'Free drive: move the arm by hand and add waypoints; guarded moves and presses are only recorded (they run on replay).';
+      : 'Move the arm by hand (Free drive) - the path is recorded while "Recording path" is on; add stop points where it must stop exactly. Guarded moves and presses are only recorded here (they run on replay; in Control mode they run right away).';
   }
   if (document.activeElement !== $('speed')) {
     $('speed').value = Math.round(s.speed * 100); $('speedVal').textContent = Math.round(s.speed * 100) + ' %';
@@ -414,6 +419,10 @@ function drawMap() {
     }
     g += `<g class="pos" data-pos="${esc(p.n)}"><circle cx="${x}" cy="${y}" r="${sel ? 10 : 8}" fill="${sel ? 'var(--accent)' : 'var(--accent-soft)'}" stroke="var(--accent)" stroke-width="2"/>
           ${arrow}<text x="${x + 12}" y="${y - 10}">${esc(p.n)}</text></g>`;
+  }
+  const rp = state && state.recording && state.recording.path;
+  if (rp && rp.length > 1) {
+    g += `<polyline fill="none" stroke="var(--warn)" stroke-width="2" points="${rp.map(xy => toDesk(xy)).map(d => `${X(d[0])},${Y(d[1])}`).join(' ')}"/>`;
   }
   if (gotoPoint) g += `<circle cx="${X(gotoPoint[0])}" cy="${Y(gotoPoint[1])}" r="6" fill="none" stroke="var(--warn)" stroke-width="2" stroke-dasharray="3 2"/>`;
   if (cur) g += `<path d="M${X(cur[0]) - 7},${Y(cur[1])} h14 M${X(cur[0])},${Y(cur[1]) - 7} v14" stroke="var(--bad)" stroke-width="2"/>`;
@@ -507,8 +516,10 @@ async function renderSeqCards() {
       html += '<p class="muted">Not recorded yet.</p>';
     }
     html += `<div class="row">
-      <button data-needs-idle data-rec="${kind}" class="primary">${s ? 'Re-record' : 'Record'}</button>
-      <label><input type="checkbox" data-cont="${kind}"> continuous path</label>
+      <button data-needs-idle data-rec="${kind}" data-cont="1" class="primary"
+        title="Records the path while you move the arm; you can still add stop points, presses etc.">${s ? 'Re-record' : 'Record'} continuously</button>
+      <button data-needs-idle data-rec="${kind}" data-cont="0"
+        title="Records only the stop points you add">${s ? 'Re-record' : 'Record'} stop points</button>
       ${s ? `<button class="small danger" data-ed="clear" data-k="${kind}" data-i="0">Delete sequence</button>` : ''}
     </div>
     <p class="muted">${kind === 'pick'
@@ -583,7 +594,7 @@ document.addEventListener('click', async (e) => {
   else if (d.delpos && confirm(`Delete position "${d.delpos}"?`)) { await api('/api/positions/' + enc(d.delpos), undefined, 'DELETE'); loadAll(); }
   else if (d.test) await api(`/api/grippers/${enc(gname)}/${d.test}/test`, {});
   else if (d.rec) {
-    const cont = document.querySelector(`[data-cont="${d.rec}"]`).checked;
+    const cont = d.cont === '1';
     const sp = document.querySelector(`[data-seqspeed="${d.rec}"]`);
     await api('/api/record/start', { gripper: gname, kind: d.rec, continuous: cont, speed: sp ? sp.value / 100 : 0.2 });
   } else if (d.toggleEd) {
@@ -617,6 +628,7 @@ document.addEventListener('change', async (e) => {
 
 // recording bar
 $('recWp').onclick = () => api('/api/record/waypoint', {});
+$('recContToggle').onclick = () => api('/api/record/continuous', { on: !(state && state.recording && state.recording.continuous) });
 $('recWait').onclick = () => api('/api/record/wait', { s: 1.0 });
 $('recGuarded').onclick = () => api('/api/record/guarded', { axis: $('gAxis').value, dist: $('gDist').value / 1000,
                                                               force: Number($('gForce').value), speed: 0.05 });

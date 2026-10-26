@@ -313,6 +313,31 @@ def main():
     assert 'maximum press depth' in msg and api('/api/state')['holding'] is True, msg
     print('press depth abort ok:', msg)
 
+    # continuous recording by hand: path is sampled and thinned, can be paused for stop points
+    api('/api/mode', {'mode': 'guide'})
+    sim.hand_guide([0.45, -0.10, 0.25])
+    api('/api/record/start', {'gripper': 'fork', 'kind': 'pick', 'continuous': True, 'speed': 0.3})
+    for i in range(1, 31):                       # 15 cm along +y in 5 mm steps, by "hand"
+        sim.hand_guide([0.45, -0.10 + 0.005 * i, 0.25])
+        time.sleep(0.11)
+    rec = api('/api/state')['recording']
+    assert rec['continuous'] and len(rec['path']) > 10, rec
+    api('/api/record/continuous', {'on': False})
+    sim.hand_guide([0.45, 0.10, 0.20]); time.sleep(0.3)
+    n_paused = api('/api/state')['recording']['steps']
+    api('/api/record/waypoint', {})
+    api('/api/record/continuous', {'on': True})
+    for i in range(1, 11):
+        sim.hand_guide([0.45 + 0.005 * i, 0.10, 0.20])
+        time.sleep(0.11)
+    api('/api/record/finish', {})
+    steps = api('/api/grippers/fork')['sequences']['pick']['steps']
+    stops = [x for x in steps if x['type'] == 'pose' and not x['blend']]
+    passes = [x for x in steps if x['type'] == 'pose' and x['blend']]
+    assert len(stops) == 3 and 25 <= len(passes) <= 45, (len(stops), len(passes))
+    print(f'continuous recording ok: {len(passes)} path points, {len(stops)} stop points '
+          f'(nothing sampled while paused: {n_paused} steps then)')
+
     # stop during a move
     api('/api/positions/shelf A/goto', method='POST')
     time.sleep(0.3)

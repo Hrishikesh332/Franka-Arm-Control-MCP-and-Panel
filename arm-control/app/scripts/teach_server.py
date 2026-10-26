@@ -129,7 +129,8 @@ class TeachServer:
 
     def record_tick(self):
         with self.lock:
-            if self.rec is None or not self.rec['continuous'] or self.pose is None:
+            if (self.rec is None or not self.rec['continuous'] or self.rec.get('paused')
+                    or self.pose is None):
                 return
             p, q = self.pose
             self.rec['steps'].append({'type': 'pose', 'p': list(p), 'q': list(q), 'blend': True})
@@ -571,36 +572,54 @@ class TeachServer:
             self.rec['steps'].append(step)
             return len(self.rec['steps'])
 
+    def record_stop_point(self):
+        """Record the current pose as a stop point unless the last recorded pose is already here."""
+        p, q = self.current_pose()
+        with self.lock:
+            if self.rec is None:
+                raise RuntimeError('not recording')
+            last = next((s for s in reversed(self.rec['steps']) if s['type'] == 'pose'), None)
+            if last and math.dist(last['p'], p) < 1e-3 and tc.quat_angle(last['q'], q) < math.radians(1):
+                last['blend'] = False
+                return len(self.rec['steps'])
+            self.rec['steps'].append({'type': 'pose', 'p': p, 'q': q, 'blend': False})
+            return len(self.rec['steps'])
+
+    def record_live(self, step, run):
+        """Add a guarded move / press: stop point where it starts, then run it live in control
+        mode (continuous sampling paused meanwhile) or only record it otherwise."""
+        with self.lock:
+            if self.rec is None:
+                raise RuntimeError('not recording')
+            live = self.follower_active
+            self.rec['paused'] = True
+        try:
+            self.record_stop_point()
+            if live:
+                self.abort.clear()
+                try:
+                    run()
+                finally:
+                    self.publish_speed(self.speed)
+            return self.record_append(step), live
+        finally:
+            with self.lock:
+                if self.rec is not None:
+                    self.rec['paused'] = False
+
     def record_guarded(self, axis, dist, force, speed):
         step = {'type': 'guarded', 'dir': AXES[axis], 'dist': float(dist), 'force': float(force),
                 'speed': float(speed)}
-        with self.lock:
-            if self.rec is None:
-                raise RuntimeError('not recording')
-            live = self.follower_active
-        if live:  # in control mode the move is done right away, so recording can continue from it
-            self.abort.clear()
-            try:
-                self.guarded_move(step, self.store.settings()['max_force'])
-            finally:
-                self.publish_speed(self.speed)
-        return self.record_append(step), live
+        return self.record_live(step, lambda: self.guarded_move(step, self.store.settings()['max_force']))
 
     def record_press(self, params):
         step = press_step(params)
-        with self.lock:
-            if self.rec is None:
-                raise RuntimeError('not recording')
-            live = self.follower_active
-        if live:  # in control mode the press is done right away
-            self.abort.clear()
-            try:
-                with self.lock:
-                    tare = list(self.wrench)
-                self.press(step, tare)
-            finally:
-                self.publish_speed(self.speed)
-        return self.record_append(step), live
+
+        def run():
+            with self.lock:
+                tare = list(self.wrench)
+            self.press(step, tare)
+        return self.record_live(step, run)
 
     def record_finish(self):
         p, q = self.current_pose()
@@ -620,7 +639,11 @@ class TeachServer:
             pose = self.pose
             rec = None if self.rec is None else {
                 'gripper': self.rec['gripper'], 'kind': self.rec['kind'],
-                'continuous': self.rec['continuous'], 'steps': len(self.rec['steps'])}
+                'continuous': self.rec['continuous'], 'paused': bool(self.rec.get('paused')),
+                'steps': len(self.rec['steps']),
+                'stops': sum(1 for x in self.rec['steps'] if x['type'] == 'pose' and not x.get('blend')),
+                # recorded path for the map (base frame x/y)
+                'path': [x['p'][:2] for x in self.rec['steps'] if x['type'] == 'pose'][-500:]}
             return {
                 'pose': {'p': pose[0], 'q': pose[1], 'yaw': tc.yaw_of(pose[1])} if pose else None,
                 'pose_age': time.time() - self.pose_stamp if pose else None,
@@ -838,8 +861,15 @@ def make_app(node):
 
     @app.post('/api/record/waypoint')
     def record_waypoint():
-        p, q = node.current_pose()
-        return ok(steps=node.record_append({'type': 'pose', 'p': p, 'q': q, 'blend': False}))
+        return ok(steps=node.record_stop_point())
+
+    @app.post('/api/record/continuous')
+    def record_continuous():
+        with node.lock:
+            if node.rec is None:
+                raise RuntimeError('not recording')
+            node.rec['continuous'] = bool(body().get('on', True))
+        return ok()
 
     @app.post('/api/record/wait')
     def record_wait():

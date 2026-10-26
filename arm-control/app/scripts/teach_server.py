@@ -263,9 +263,20 @@ class TeachServer:
             desk.take_control(on_waiting=say)
             self.desk = desk
             say('unlocking the brakes')
-            desk.open_brakes()
+            try:
+                desk.open_brakes()
+            except DeskError as e:
+                log.info('unlock: %s (continuing, the brakes may already be open)', e)
             say('activating FCI')
-            desk.activate_fci()
+            end = time.time() + 10.0  # unlocking takes a few seconds; FCI waits for it
+            while True:
+                try:
+                    desk.activate_fci()
+                    break
+                except DeskError:
+                    if time.time() > end:
+                        raise
+                    time.sleep(1.0)
         self.desk_job('unlock & activate FCI', steps)
 
     def desk_stop(self):

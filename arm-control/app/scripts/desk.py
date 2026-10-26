@@ -1,13 +1,15 @@
 """Minimal client for the Franka Desk web API: take control, unlock the brakes, activate FCI.
 
-Desk has no public API documentation; these are the endpoints its own web page uses (the same
-ones tools like panda-py use). Only one session can hold control of the robot. If someone else
+Desk has no public API documentation; these are the calls its own web app makes (checked against
+Desk 5.10 on our FR3): /admin/api takes JSON, /desk/api takes form-encoded bodies, and the control
+token goes in the X-Control-Token header. Only one session can hold control of the robot. If someone else
 holds it (e.g. a Desk browser tab), control can be taken over by confirming with the circle button
 on the robot's Pilot.
 """
 
 import base64
 import hashlib
+import re
 import time
 
 import requests
@@ -43,7 +45,9 @@ class Desk:
             headers['X-Control-Token'] = self.token
         r = self.session.request(method, self.base + path, headers=headers, timeout=self.timeout, **kw)
         if r.status_code >= 400:
-            raise DeskError(f'{method} {path}: HTTP {r.status_code} {r.text.strip()[:200]}')
+            text = re.sub(r'<[^>]+>', ' ', r.text)  # error pages come as HTML
+            text = re.sub(r'\s+', ' ', text).strip()[:160]
+            raise DeskError(f'{method} {path}: HTTP {r.status_code} {text}')
         return r
 
     def login(self):
@@ -83,13 +87,15 @@ class Desk:
                 self.token = self.token_id = None
 
     def open_brakes(self):
-        self._request('POST', '/desk/api/robot/open-brakes')
+        self._request('POST', '/desk/api/joints/unlock')
 
     def close_brakes(self):
-        self._request('POST', '/desk/api/robot/close-brakes')
+        self._request('POST', '/desk/api/joints/lock')
 
     def activate_fci(self):
-        self._request('POST', '/admin/api/control-token/fci', json={'token': self.token})
+        # Desk's app sends the control token base64 encoded (again) as a form field
+        token = base64.b64encode(self.token.encode()).decode()
+        self._request('POST', '/desk/api/system/fci', data={'token': token})
 
     def deactivate_fci(self):
         self._request('DELETE', '/admin/api/control-token/fci', json={'token': self.token})

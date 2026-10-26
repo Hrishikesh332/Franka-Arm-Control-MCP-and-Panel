@@ -1,5 +1,9 @@
 # arm-control
 
+> ### ▶ Open the UI: **[http://10.23.60.102:8080](http://10.23.60.102:8080)**
+> Laptop on the WiFi `3-UTUM-IOT`. The Pi gets its address by DHCP, so it can change — if the link
+> does not load, see [finding the IP](#connecting-to-the-pi).
+
 **Teach-and-repeat for a Franka Research 3 with exchangeable passive grippers — run from a
 Raspberry Pi 4, operated from a web page.**
 
@@ -19,7 +23,7 @@ everywhere on the desk.
 | Hostname | `6B-PI4` (mDNS / `.local` does not work on the venue WiFi — use the IP) |
 | User / password | `anton` / `1234` (also the `sudo` password) |
 | WiFi | `3-UTUM-IOT` — your laptop must be on the same network (`MunichUrbanColab` isolates devices from each other) |
-| IP address | DHCP, changes after the Pi was off for a while — last seen `10.23.60.42` |
+| IP address | DHCP, changes after the Pi was off for a while — last seen `10.23.60.102` |
 | Web UI | `http://<ip>:8080` |
 | SSH | `ssh anton@<ip>` |
 | Robot network | Pi `eth0` = `192.168.5.12/24`, FR3 = `192.168.5.10` (Desk only reachable through the Pi) |

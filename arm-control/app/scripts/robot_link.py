@@ -13,7 +13,7 @@ COMMAND_ADDR = ('127.0.0.1', 5555)
 STATE_ADDR = ('127.0.0.1', 5556)
 
 # franka_teach_rt mode names -> modes of the teach server
-RT_MODES = {'idle': 'off', 'free': 'guide', 'follow': 'control'}
+RT_MODES = {'idle': 'off', 'free': 'guide', 'follow': 'control', 'home': 'home'}
 SERVER_MODES = {v: k for k, v in RT_MODES.items()}
 
 

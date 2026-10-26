@@ -67,7 +67,15 @@ class SimRobot:
     def command(self, line):
         f = line.split()
         with self.lock:
-            if f[0] == 'mode':
+            if f[0] == 'mode' and f[1] == 'home':
+                self.mode, self.active, self.target = 'home', False, None
+
+                def arrive():  # like franka_teach_rt: joint motion to the ready pose, then idle
+                    time.sleep(0.5)
+                    with self.lock:
+                        self.p, self.q, self.mode = [0.307, 0.0, 0.59], [1.0, 0.0, 0.0, 0.0], 'off'
+                threading.Thread(target=arrive, daemon=True).start()
+            elif f[0] == 'mode':
                 self.mode = {'idle': 'off', 'free': 'guide', 'follow': 'control'}[f[1]]
                 self.active, self.target = self.mode == 'control', None
                 if self.mode != 'control':
@@ -363,6 +371,39 @@ def main():
     press = [x for x in api('/api/grippers/fork')['sequences']['place']['steps'] if x['type'] == 'press']
     assert len(press) == 1 and 5.5 <= press[0]['force'] <= 8.0 and press[0]['rotate_deg'] == 45, press
     print(f'measure force ok: {m["message"]}')
+
+    # a point recorded pushed into the table: replaying it hits the force limit, "-> press" fixes it
+    api('/api/mode', {'mode': 'guide'})
+    sim.hand_guide([0.5, 0.0, 0.25])
+    api('/api/grippers', {'name': 'hook'})
+    api('/api/record/start', {'gripper': 'hook', 'kind': 'pick', 'speed': 0.5})
+    sim.hand_guide([0.5, 0.0, TABLE_Z - 0.002]); api('/api/record/waypoint', {})   # 2 mm into the table
+    sim.hand_guide([0.5, 0.0, 0.25])
+    api('/api/record/finish', {})
+    api('/api/settings', {'max_force': 3.0})   # the table spring is soft, so a low limit shows it
+    api('/api/grippers/hook/pick/test', method='POST')
+    msg = wait_job()
+    assert msg.startswith('aborted: force limit'), msg
+    api('/api/jog', {'axis': 'z', 'delta': 0.05})   # the abort left the arm pressing: lift it off
+    time.sleep(1.5)
+    api('/api/grippers/hook/pick/edit', {'op': 'to_press', 'index': 1, 'force': 2.5, 'contact': 'springy',
+                                         'clearance': 0.01})
+    steps = api('/api/grippers/hook')['sequences']['pick']['steps']
+    assert [x['type'] for x in steps] == ['pose', 'pose', 'press', 'pose'], steps
+    assert abs(steps[1]['p'][2] - (TABLE_Z + 0.008)) < 1e-6, steps[1]['p']
+    sim.max_press = 0.0
+    api('/api/grippers/hook/pick/test', method='POST')
+    msg = wait_job()
+    assert msg == 'done' and 2.0 < sim.max_press < 3.0, (msg, sim.max_press)
+    api('/api/settings', {'max_force': 25.0})
+    print(f'to_press ok: replay pressed with {sim.max_press:.1f} N instead of hitting the force limit')
+
+    # homing: joint motion to the ready pose, ends in Hold
+    api('/api/home', method='POST')
+    assert wait_job() == 'done'
+    st = api('/api/state')
+    assert st['mode'] == 'off' and abs(st['pose']['p'][2] - 0.59) < 1e-6, st['mode']
+    print('home ok')
 
     # stop during a move
     api('/api/positions/shelf A/goto', method='POST')

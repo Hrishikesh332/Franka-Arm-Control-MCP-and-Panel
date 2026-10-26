@@ -6,6 +6,7 @@
 //   follow  - Cartesian pose control that smoothly follows the latest target pose, with an
 //             optional force mode along z (pressing)
 //   free    - torque control with gravity compensation and joint damping (hand guiding)
+//   home    - slow joint motion to the ready pose (every joint well inside its range), then idle
 //
 // The teach server (Python) talks to it over two local UDP ports with one-line text messages:
 // commands to 127.0.0.1:5555, state broadcasts at 50 Hz to 127.0.0.1:5556 (see send_state()).
@@ -72,12 +73,17 @@ constexpr double kAutoRecoverDelay = 0.5;         // s after a reflex before cle
 constexpr double kFreeWallMargin = 0.25;          // rad
 constexpr double kFreeWallStiffness = 20.0;       // Nm/rad
 constexpr double kFollowStopMargin = 0.15;        // rad
+// Home: Franka's ready pose, far from all joint limits; reached with a cosine profile whose peak
+// joint speed is kHomeSpeed. A stop request slows the motion down to standstill smoothly.
+constexpr std::array<double, 7> kHomePose{{0.0, -M_PI_4, 0.0, -3.0 * M_PI_4, 0.0, M_PI_2, M_PI_4}};
+constexpr double kHomeSpeed = 0.3;                // rad/s
+constexpr double kHomeStopTime = 0.5;             // s to slow down to standstill
 
-enum class Mode { kIdle, kFollow, kFree };
+enum class Mode { kIdle, kFollow, kFree, kHome };
 enum ForceFault { kNoFault = 0, kAbortForce = 1, kMaxDepth = 2 };
 
 const char* mode_name(Mode m) {
-  return m == Mode::kFollow ? "follow" : m == Mode::kFree ? "free" : "idle";
+  return m == Mode::kFollow ? "follow" : m == Mode::kFree ? "free" : m == Mode::kHome ? "home" : "idle";
 }
 
 // Per joint: |dq| as a fraction of the position-dependent velocity limit in that direction.
@@ -410,7 +416,8 @@ void handle_command(Shared& shared, const std::string& line) {
   if (cmd == "mode") {
     std::string m;
     in >> m;
-    shared.requested_mode = m == "follow" ? Mode::kFollow : m == "free" ? Mode::kFree : Mode::kIdle;
+    shared.requested_mode = m == "follow" ? Mode::kFollow : m == "free" ? Mode::kFree
+                            : m == "home"   ? Mode::kHome   : Mode::kIdle;
     shared.joint_warning = 0;
     if (shared.requested_mode != Mode::kIdle) {
       std::lock_guard<std::mutex> state_lock(shared.state_mutex);
@@ -595,6 +602,54 @@ void run_follow(franka::Robot& robot, Shared& shared) {
   });
 }
 
+void run_home(franka::Robot& robot, Shared& shared) {
+  std::array<double, 7> q0{};
+  double duration = 0.0, s = 0.0, rate = 1.0;  // s: progress in "motion time", rate: time scale
+  bool first = true, stopping = false;
+  shared.stop_requested = false;
+  robot.control([&](const franka::RobotState& state, franka::Duration period) -> franka::JointPositions {
+    if (first) {
+      q0 = state.q_d;  // the first command must be the last commanded position
+      double max_delta = 0.0;
+      for (size_t i = 0; i < 7; i++) {
+        max_delta = std::max(max_delta, std::abs(kHomePose[i] - q0[i]));
+      }
+      // cosine profile: peak speed = pi/2 * delta / duration
+      duration = std::max(1.0, M_PI_2 * max_delta / kHomeSpeed);
+      first = false;
+    }
+    {
+      std::unique_lock<std::mutex> lock(shared.mutex, std::try_to_lock);
+      if (lock.owns_lock() && (shared.requested_mode != Mode::kHome || !shared.running)) {
+        stopping = true;
+      }
+    }
+    if (shared.stop_requested.exchange(false)) {
+      stopping = true;
+    }
+    const double dt = period.toSec();
+    if (stopping) {
+      rate = std::max(0.0, rate - dt / kHomeStopTime);  // velocity scales with rate: smooth stop
+    }
+    s = std::min(duration, s + rate * dt);
+    const double f = 0.5 * (1.0 - std::cos(M_PI * s / duration));
+    std::array<double, 7> q{};
+    for (size_t i = 0; i < 7; i++) {
+      q[i] = q0[i] + f * (kHomePose[i] - q0[i]);
+    }
+    store_state(shared, Mode::kHome, state, {});
+    franka::JointPositions out(q);
+    if (s >= duration || (stopping && rate <= 0.0)) {
+      return franka::MotionFinished(out);
+    }
+    return out;
+  });
+  std::lock_guard<std::mutex> lock(shared.mutex);
+  if (shared.requested_mode == Mode::kHome) {
+    shared.requested_mode = Mode::kIdle;  // done: hold there
+  }
+}
+
 void run_free(franka::Robot& robot, Shared& shared) {
   std::array<double, 7> tau{};
   bool leaving = false;
@@ -656,6 +711,8 @@ int main(int argc, char** argv) {
             run_follow(robot, shared);
           } else if (mode == Mode::kFree) {
             run_free(robot, shared);
+          } else if (mode == Mode::kHome) {
+            run_home(robot, shared);
           } else {
             run_idle(robot, shared);
           }

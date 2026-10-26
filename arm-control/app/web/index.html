@@ -84,11 +84,13 @@
   <span id="conn" class="pill">connecting…</span>
   <button id="fciStart" class="primary" hidden>Unlock &amp; activate FCI</button>
   <span id="deskMsg" class="pill warn" hidden></span>
+  <span id="jobChip" class="pill" hidden></span>
   <span id="rmode" class="pill">robot: –</span>
   <span id="gchip" class="pill">no gripper</span>
   <span id="errors" class="pill bad" hidden></span>
   <button id="recover" hidden>Recover errors</button>
   <span class="spacer"></span>
+  <button id="home" title="Slowly move all joints to the ready pose, well away from their limits">Home</button>
   <button id="modeOff" title="The robot holds its position by itself">Hold</button>
   <button id="modeGuide" title="Free drive: push the arm by hand, it stays where you let go">Free drive</button>
   <button id="modeControl" title="The arm is stiff and follows jog / sequence commands">Control</button>
@@ -169,7 +171,7 @@
     <section class="wide">
       <h2>Grippers</h2>
       <div class="row">
-        <select id="editGripper" class="grow"></select>
+        <label class="grow">Mounted gripper <select id="editGripper" class="grow"></select></label>
         <input id="newGripper" placeholder="new gripper name">
         <button id="addGripper">Add</button>
         <button id="delGripper" class="danger">Delete</button>
@@ -355,6 +357,9 @@ function renderState() {
   $('errors').hidden = !shown; $('errors').textContent = shown;
   $('recover').hidden = !(errs.length || s.robot_mode === 'reflex');
   if (document.activeElement !== $('activeGripper')) $('activeGripper').value = s.gripper || '';
+  if (document.activeElement !== $('editGripper') && $('editGripper').value !== (s.gripper || '')) {
+    $('editGripper').value = s.gripper || ''; renderSeqCards();
+  }
   $('gchip').textContent = s.gripper ? `${s.gripper} · ${s.holding ? 'full' : 'empty'}` : 'no gripper selected';
   $('gchip').className = 'pill ' + (s.gripper ? '' : 'warn');
   $('holdChip').textContent = s.holding ? 'holding a part' : 'empty';
@@ -374,8 +379,12 @@ function renderState() {
     guide: 'Free drive: push the arm by hand, it stays where you let go. Needs the gripper mass set, otherwise it slowly sinks.',
     off: 'Hold: the robot holds its position by itself. Choose Free drive to move it by hand or Control to jog.',
   }[s.mode] || '';
+  const jm = s.job.message || '';
+  $('jobChip').hidden = !(s.job.running || jm.startsWith('aborted'));
+  $('jobChip').textContent = `${s.job.label}: ${jm}`;
+  $('jobChip').className = 'pill ' + (jm.startsWith('aborted') ? 'bad' : '');
   const autoBtn = document.querySelector('[data-act=auto]');
-  if (autoBtn) autoBtn.textContent = s.holding ? 'Place here' : 'Pick here';
+  if (autoBtn) autoBtn.textContent = (s.holding ? 'Place here' : 'Pick here') + (s.gripper ? ` (${s.gripper})` : '');
   const busy = s.job.running;
   document.querySelectorAll('#jog button').forEach(b => b.disabled = !control || busy);
   $('jobStatus').textContent = s.job.label ? `${s.job.label}: ${s.job.message}` : '';
@@ -471,7 +480,7 @@ function renderPositions() {
   } else if (selected && positions[selected]) {
     const holding = state && state.holding;
     sa.innerHTML = `<strong>${esc(selected)}</strong>
-      <button class="primary big" data-needs-idle data-act="auto">${holding ? 'Place here' : 'Pick here'}</button>
+      <button class="primary big" data-needs-idle data-act="auto">${holding ? 'Place here' : 'Pick here'}${state && state.gripper ? ` (${esc(state.gripper)})` : ''}</button>
       <button data-needs-idle data-act="goto">Go above</button>`;
   } else {
     sa.innerHTML = '<span class="muted">Select a position on the map or in the list.</span>';
@@ -493,9 +502,10 @@ async function renderGrippers() {
   const opts = grippers.map(g => `<option ${g.name === active ? 'selected' : ''}>${esc(g.name)}</option>`).join('');
   if (document.activeElement !== $('activeGripper'))
     $('activeGripper').innerHTML = `<option value="">— none —</option>` + opts;
-  const ed = $('editGripper'), prev = ed.value;
-  ed.innerHTML = grippers.length ? grippers.map(g => `<option>${esc(g.name)}</option>`).join('') : '<option value="">no grippers yet</option>';
-  if (grippers.some(g => g.name === prev)) ed.value = prev; else if (active) ed.value = active;
+  // one selection only: the gripper shown here is the mounted one (pick/place, mass, free drive)
+  const ed = $('editGripper');
+  ed.innerHTML = grippers.length ? '<option value="">— none —</option>' + opts : '<option value="">no grippers yet</option>';
+  ed.value = active || '';
   await renderSeqCards();
 }
 
@@ -519,7 +529,8 @@ async function renderSeqCards() {
         <button class="small" data-toggle-ed="${kind}">${openEditors.has(key) ? 'Hide steps' : 'Edit steps'}</button></div>`;
       if (openEditors.has(key)) {
         html += '<table>' + s.steps.map((st, i) => `<tr><td class="num muted">${i + 1}</td><td>${stepText(st, i)}</td><td class="r">
-          ${st.type === 'pose' ? `<button class="small" data-ed="toggle_blend" data-k="${kind}" data-i="${i}" title="stop / pass through">⇄</button>` : ''}
+          ${st.type === 'pose' ? `<button class="small" data-ed="toggle_blend" data-k="${kind}" data-i="${i}" title="stop / pass through">⇄</button>
+            <button class="small" data-ed="to_press" data-k="${kind}" data-i="${i}" title="this point touches the part/desk: stop above it and press there with a set force instead">→press</button>` : ''}
           ${st.type === 'wait' ? `<button class="small" data-ed="set_wait" data-k="${kind}" data-i="${i}">edit</button>` : ''}
           ${st.type === 'guarded' ? `<button class="small" data-ed="set_guarded" data-k="${kind}" data-i="${i}">edit</button>` : ''}
           ${st.type === 'press' ? `<button class="small" data-ed="set_press" data-k="${kind}" data-i="${i}">edit</button>` : ''}
@@ -570,6 +581,9 @@ async function poll() {
 
 // ---------------------------------------------------------------- actions
 $('modeOff').onclick = () => api('/api/mode', { mode: 'off' });
+$('home').onclick = () => {
+  if (confirm('Move the arm slowly to the home pose? Make sure the way is clear.')) api('/api/home', {});
+};
 $('fciStart').onclick = $('fciStart2').onclick = () => api('/api/robot/start', {});
 $('fciStop').onclick = () => { if (confirm('Deactivate FCI and lock the brakes?')) api('/api/robot/stop', {}); };
 $('saveDeskLogin').onclick = async () => {
@@ -584,7 +598,9 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') api('/api/
 $('speed').oninput = () => $('speedVal').textContent = $('speed').value + ' %';
 $('speed').onchange = () => api('/api/speed', { speed: $('speed').value / 100 });
 
-$('activeGripper').onchange = async () => { await api('/api/active', { gripper: $('activeGripper').value }); renderGrippers(); };
+$('activeGripper').onchange = async () => {
+  try { await api('/api/active', { gripper: $('activeGripper').value }); } finally { renderGrippers(); }
+};
 $('holdToggle').onclick = () => {
   const now = state && state.holding;
   if (confirm(`Mark the gripper as ${now ? 'EMPTY' : 'HOLDING A PART'}?`)) api('/api/active', { holding: !now });
@@ -628,6 +644,12 @@ document.addEventListener('click', async (e) => {
       Object.assign(body, { axis, dist: Number(dist) / 1000, force: Number(force), speed: Number(speed) / 100 });
       if (d.ed === 'set_guarded') body.op = 'set';
     }
+    if (d.ed === 'to_press') {
+      const v = prompt('Press at this point instead of moving into it: force N, springy|hard, stop this many mm above the recorded point', '15 hard 10');
+      if (v === null) return;
+      const [force, contact, above] = v.trim().split(/\s+/);
+      Object.assign(body, { force: Number(force), contact: contact || 'hard', clearance: Number(above || 10) / 1000 });
+    }
     if (d.ed === 'insert_press' || d.ed === 'set_press') {
       const v = prompt('Press: force N, springy|hard, rotate °, rotation speed °/s, hold s, max depth mm', '10 springy 0 30 0.5 30');
       if (v === null) return;
@@ -663,13 +685,15 @@ $('recFinish').onclick = async () => { await api('/api/record/finish', {}); rend
 $('recCancel').onclick = () => { if (confirm('Discard this recording?')) api('/api/record/cancel', {}); };
 
 // grippers
-$('editGripper').onchange = renderSeqCards;
+$('editGripper').onchange = async () => {
+  try { await api('/api/active', { gripper: $('editGripper').value }); } finally { renderGrippers(); }
+};
 $('addGripper').onclick = async () => {
   const n = $('newGripper').value.trim(); if (!n) return toast('Enter a gripper name.');
-  await api('/api/grippers', { name: n }); $('newGripper').value = ''; await renderGrippers();
-  $('editGripper').value = n; renderSeqCards();
+  await api('/api/grippers', { name: n }); $('newGripper').value = '';
+  await api('/api/active', { gripper: n }).catch(() => {}); renderGrippers();
 };
-$('saveLoad').onclick = () => api(`/api/grippers/${enc($('editGripper').value)}/load`, {
+$('saveLoad').onclick = () => !$('editGripper').value ? toast('Select the mounted gripper first.') : api(`/api/grippers/${enc($('editGripper').value)}/load`, {
   mass: Number($('gMass').value), com_mm: [Number($('gCx').value), Number($('gCy').value), Number($('gCz').value)] });
 $('delGripper').onclick = async () => {
   const n = $('editGripper').value;

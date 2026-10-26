@@ -516,6 +516,46 @@ class TeachServer:
         self.job = threading.Thread(target=run, daemon=True)
         self.job.start()
 
+    def home(self):
+        """Slow joint motion to the ready pose (all joints well inside their ranges)."""
+        if self.job is not None and self.job.is_alive():
+            raise RuntimeError('the robot is busy')
+        with self.lock:
+            if self.rec is not None:
+                raise RuntimeError('finish or discard the recording first')
+        self.set_mode('off')
+        self.abort.clear()
+
+        def run():
+            self.job_info.update(running=True, label='home', step=0, steps=1, message='moving home')
+            try:
+                self.link.send('mode home')
+                end = time.time() + 3.0
+                while self.active_mode != 'home':
+                    if time.time() > end:
+                        raise Aborted(self.last_error or 'the robot did not start the motion')
+                    time.sleep(0.02)
+                end = time.time() + 120.0
+                while self.active_mode == 'home':
+                    if time.time() > end:
+                        raise Aborted('timeout')
+                    time.sleep(0.05)
+                with self.lock:
+                    error = self.last_error if self.robot_mode == 4 or self.errors else ''
+                if self.abort.is_set():
+                    raise Aborted('stopped')
+                if error:
+                    raise Aborted(error)
+                self.job_info['message'] = 'done'
+            except Aborted as e:
+                self.job_info['message'] = f'aborted: {e}'
+                log.warning('home: %s', e)
+            finally:
+                self.job_info['running'] = False
+
+        self.job = threading.Thread(target=run, daemon=True)
+        self.job.start()
+
     def plan_at(self, kind, pos):
         """Transit + sequence for the active gripper at a position."""
         st = self.store.state()
@@ -802,6 +842,11 @@ def make_app(node):
         node.send_target(p, q)
         return ok()
 
+    @app.post('/api/home')
+    def post_home():
+        node.home()
+        return ok()
+
     @app.post('/api/stop')
     def post_stop():
         node.stop()
@@ -863,8 +908,15 @@ def make_app(node):
         if not 0.0 <= mass <= 3.0 or any(abs(c) > 0.3 for c in com):
             raise ValueError('mass must be 0-3 kg and the centre of mass within 300 mm')
         store.set_gripper_load(name, mass, com)
-        if store.state()['gripper'] == name and node.active_mode == 'off':
+        if store.state()['gripper'] == name:
+            # the robot takes a new load only while none of our controllers runs: briefly Hold
+            if node.job is not None and node.job.is_alive():
+                raise RuntimeError('saved - it is sent to the robot after the running motion')
+            previous = node.active_mode
+            node.set_mode('off')
             node.apply_load()
+            time.sleep(0.3)
+            node.set_mode(previous)
         return ok()
 
     @app.post('/api/grippers/<name>/<kind>/edit')
@@ -895,6 +947,12 @@ def make_app(node):
                                  'speed': float(b.get('speed', 0.05))})
         elif op == 'insert_press':
             steps.insert(i + 1, press_step(b))
+        elif op == 'to_press' and steps[i]['type'] == 'pose':
+            # a point recorded at (or pushed into) the contact: stop above it, then press there
+            clearance = min(0.05, max(0.002, float(b.get('clearance', 0.01))))
+            steps[i] = {**steps[i], 'p': [steps[i]['p'][0], steps[i]['p'][1], steps[i]['p'][2] + clearance],
+                        'blend': False}
+            steps.insert(i + 1, press_step({**b, 'max_depth': clearance + float(b.get('extra_depth', 0.02))}))
         elif op == 'set' and steps[i]['type'] == 'press':
             steps[i] = press_step({**steps[i], **b})
         elif op == 'set':

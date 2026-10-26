@@ -32,6 +32,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <Eigen/Dense>
 #include <franka/exception.h>
@@ -86,6 +87,41 @@ std::array<double, 7> joint_speed_ratios(const std::array<double, 7>& q, const s
     r[i] = std::abs(dq[i]) / std::max(limit, 1e-3);
   }
   return r;
+}
+
+// FR3 joint position ranges (rad), from Franka's control parameter documentation.
+constexpr std::array<double, 7> kJointMin{{-2.7437, -1.7837, -2.9007, -3.0421, -2.8065, 0.5445, -3.0159}};
+constexpr std::array<double, 7> kJointMax{{2.7437, 1.7837, 2.9007, -0.1518, 2.8065, 4.5169, 3.0159}};
+
+// Which joint came closest to its velocity limit in the states libfranka logged before a reflex,
+// e.g. "joint 7 at 2.91 rad (range -3.02..3.02): 0.42 rad/s, allowed 0.35".
+std::string joint_diagnosis(const std::vector<franka::Record>& log) {
+  double worst = -1.0;
+  size_t joint = 0;
+  franka::RobotState at;
+  for (const auto& record : log) {
+    const auto r = joint_speed_ratios(record.state.q, record.state.dq);
+    for (size_t i = 0; i < 7; i++) {
+      if (r[i] > worst) {
+        worst = r[i];
+        joint = i;
+        at = record.state;
+      }
+    }
+  }
+  if (worst < 0.0) {
+    return "";
+  }
+  const double q = at.q[joint], dq = at.dq[joint];
+  char buf[200];
+  std::snprintf(buf, sizeof(buf), "joint %zu at %.2f rad (range %.2f..%.2f): %.2f rad/s, allowed %.2f",
+                joint + 1, q, kJointMin[joint], kJointMax[joint], std::abs(dq),
+                std::abs(dq) / std::max(worst, 1e-6));
+  std::string out(buf);
+  if (q - kJointMin[joint] < 0.25 || kJointMax[joint] - q < 0.25) {
+    out += " - near the end of its range";
+  }
+  return out;
 }
 
 Eigen::Vector3d clamp_norm(const Eigen::Vector3d& v, double max_norm) {
@@ -591,10 +627,12 @@ int main(int argc, char** argv) {
             run_idle(robot, shared);
           }
         } catch (const franka::ControlException& e) {
-          std::cerr << "control error: " << e.what() << std::endl;
+          const std::string diagnosis = joint_diagnosis(e.log);
+          std::cerr << "control error: " << e.what() << (diagnosis.empty() ? "" : " | ") << diagnosis
+                    << std::endl;
           {
             std::lock_guard<std::mutex> lock(shared.state_mutex);
-            shared.last_error = e.what();
+            shared.last_error = std::string(e.what()) + (diagnosis.empty() ? "" : " | " + diagnosis);
           }
           {
             std::lock_guard<std::mutex> lock(shared.mutex);

@@ -66,6 +66,12 @@ constexpr double kMaxDampingTorque = 15.0;        // Nm
 // damps harder, so neither runs into a joint_velocity_violation reflex.
 constexpr double kJointSpeedSoftLimit = 0.5;
 constexpr double kAutoRecoverDelay = 0.5;         // s after a reflex before clearing it
+// Soft joint limits: at the end of a joint's range its allowed velocity is zero, and any motion
+// there trips joint_velocity_violation (the arm can even get stuck). Free drive pushes back with a
+// spring this far before the end; follow mode stops when a joint gets this close and keeps going.
+constexpr double kFreeWallMargin = 0.25;          // rad
+constexpr double kFreeWallStiffness = 20.0;       // Nm/rad
+constexpr double kFollowStopMargin = 0.15;        // rad
 
 enum class Mode { kIdle, kFollow, kFree };
 enum ForceFault { kNoFault = 0, kAbortForce = 1, kMaxDepth = 2 };
@@ -124,6 +130,17 @@ std::string joint_diagnosis(const std::vector<franka::Record>& log) {
   return out;
 }
 
+// 1-based index of a joint closer than margin to the end of its range and moving towards it.
+int joint_approaching_limit(const franka::RobotState& s, double margin) {
+  for (size_t i = 0; i < 7; i++) {
+    if ((s.q[i] > kJointMax[i] - margin && s.dq[i] > 1e-3) ||
+        (s.q[i] < kJointMin[i] + margin && s.dq[i] < -1e-3)) {
+      return static_cast<int>(i) + 1;
+    }
+  }
+  return 0;
+}
+
 Eigen::Vector3d clamp_norm(const Eigen::Vector3d& v, double max_norm) {
   const double n = v.norm();
   return n > max_norm ? Eigen::Vector3d(v * (max_norm / n)) : v;
@@ -146,6 +163,7 @@ struct Shared {
   std::deque<std::string> parameter_commands;  // executed in idle mode
   std::atomic<bool> stop_requested{false};
   std::atomic<double> speed{0.3};
+  std::atomic<int> joint_warning{0};  // 1-based joint that follow mode stopped for (0 = none)
   std::atomic<bool> running{true};
 
   // state snapshot written by the realtime loop
@@ -368,7 +386,7 @@ void send_state(Shared& shared, int sock, const sockaddr_in& dest) {
     counter = shared.counter;
   }
   // S <mode> <robot_mode> <success> <O_T_EE x16> <O_F_ext_hat_K x6> <follower x8> <counter>
-  //   |<current errors>|<last error>
+  //   |<current errors>|<last error>|<warning>
   // or, while there is no connection to the robot:  E <reason>
   std::ostringstream out;
   out.precision(9);
@@ -377,7 +395,9 @@ void send_state(Shared& shared, int sock, const sockaddr_in& dest) {
   for (double v : s.O_T_EE) out << ' ' << v;
   for (double v : s.O_F_ext_hat_K) out << ' ' << v;
   for (double v : f) out << ' ' << v;
-  out << ' ' << counter << '|' << static_cast<std::string>(s.current_errors) << '|' << error;
+  const int joint = shared.joint_warning.load();
+  out << ' ' << counter << '|' << static_cast<std::string>(s.current_errors) << '|' << error << '|'
+      << (joint ? "joint " + std::to_string(joint) + " near the end of its range - stopped" : "");
   const std::string msg = out.str();
   sendto(sock, msg.data(), msg.size(), 0, reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
 }
@@ -391,6 +411,7 @@ void handle_command(Shared& shared, const std::string& line) {
     std::string m;
     in >> m;
     shared.requested_mode = m == "follow" ? Mode::kFollow : m == "free" ? Mode::kFree : Mode::kIdle;
+    shared.joint_warning = 0;
     if (shared.requested_mode != Mode::kIdle) {
       std::lock_guard<std::mutex> state_lock(shared.state_mutex);
       shared.last_error.clear();
@@ -544,6 +565,7 @@ void run_follow(franka::Robot& robot, Shared& shared) {
       if (shared.target_seq != target_seq) {
         target_seq = shared.target_seq;
         follower.set_target(shared.target_p, shared.target_q);
+        shared.joint_warning = 0;
       }
       if (shared.force_seq != force_seq) {
         force_seq = shared.force_seq;
@@ -554,6 +576,10 @@ void run_follow(franka::Robot& robot, Shared& shared) {
     }
     if (shared.stop_requested.exchange(false) || leaving) {
       follower.stop();
+    }
+    if (const int joint = joint_approaching_limit(state, kFollowStopMargin)) {
+      follower.stop();  // the server sees the warning and aborts a running sequence
+      shared.joint_warning = joint;
     }
     const double dt = period.toSec() > 0.0 ? std::clamp(period.toSec(), 0.0005, 0.005) : 0.001;
     const auto ratios = joint_speed_ratios(state.q, state.dq);
@@ -585,8 +611,15 @@ void run_free(franka::Robot& robot, Shared& shared) {
       // damping rises steeply once a joint uses more than half of its current velocity limit
       const double excess = std::max(0.0, ratios[i] - kJointSpeedSoftLimit) / (1.0 - kJointSpeedSoftLimit);
       const double damping = kDamping[i] * (1.0 + 20.0 * excess);
+      // soft wall before the ends of the range: a spring pushing back towards the middle
+      double wall = 0.0;
+      if (state.q[i] > kJointMax[i] - kFreeWallMargin) {
+        wall = -kFreeWallStiffness * (state.q[i] - (kJointMax[i] - kFreeWallMargin));
+      } else if (state.q[i] < kJointMin[i] + kFreeWallMargin) {
+        wall = kFreeWallStiffness * ((kJointMin[i] + kFreeWallMargin) - state.q[i]);
+      }
       const double desired = leaving ? 0.0
-                                     : std::clamp(-damping * state.dq[i], -kMaxDampingTorque,
+                                     : std::clamp(-damping * state.dq[i] + wall, -kMaxDampingTorque,
                                                   kMaxDampingTorque);
       tau[i] += std::clamp(desired - tau[i], -max_step, max_step);
       zero = zero && std::abs(tau[i]) < 1e-9;

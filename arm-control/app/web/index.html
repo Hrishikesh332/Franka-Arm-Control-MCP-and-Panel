@@ -350,7 +350,8 @@ function renderState() {
     + (s.robot_mode === 'move' && s.success_rate !== null ? ` · link ${(s.success_rate * 100).toFixed(0)} %` : '');
   $('rmode').className = 'pill ' + (['reflex', 'user stopped'].includes(s.robot_mode) ? 'bad' : '');
   const errs = s.errors || [];
-  const shown = errs.length ? errs.join(', ') : (s.last_error ? 'last stop: ' + s.last_error.replace(/^libfranka: /, '') : '');
+  const shown = errs.length ? errs.join(', ') : s.warning ? s.warning
+    : (s.last_error ? 'last stop: ' + s.last_error.replace(/^libfranka: /, '') : '');
   $('errors').hidden = !shown; $('errors').textContent = shown;
   $('recover').hidden = !(errs.length || s.robot_mode === 'reflex');
   if (document.activeElement !== $('activeGripper')) $('activeGripper').value = s.gripper || '';

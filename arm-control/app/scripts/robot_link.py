@@ -22,7 +22,7 @@ def parse_state(datagram):
     or E <reason> while franka_teach_rt has no connection to the robot."""
     if datagram.startswith('E'):
         return {'connected': False, 'last_error': datagram[1:].strip()}
-    head, errors, last_error = datagram.split('|', 2)
+    head, errors, last_error, *rest = datagram.split('|', 3)
     f = head.split()
     if f[0] != 'S' or len(f) != 35:
         raise ValueError('bad state message')
@@ -44,6 +44,7 @@ def parse_state(datagram):
         'counter': int(f[34]),
         'errors': errors,
         'last_error': last_error.strip(),
+        'warning': rest[0].strip() if rest else '',
     }
 
 

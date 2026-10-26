@@ -89,6 +89,7 @@ class TeachServer:
         self.success_rate = None
         self.errors = []
         self.last_error = ''
+        self.warning = ''
         self.connected = False
         self.connection_error = 'robot process not running'
         self.connect_stamp = 0.0
@@ -124,6 +125,7 @@ class TeachServer:
             self.success_rate = st['success_rate']
             self.errors = st['errors']
             self.last_error = st['last_error']
+            self.warning = st.get('warning', '')
             self.active_mode = st['mode']
             self.follower_status = st['follower'] if st['mode'] == 'control' else None
 
@@ -353,6 +355,10 @@ class TeachServer:
             raise Aborted('stopped')
         with self.lock:
             active, mode, w = self.follower_active, self.robot_mode, list(self.wrench)
+        with self.lock:
+            warning = self.warning
+        if warning:
+            raise Aborted(warning)
         if not active or mode == 4:
             with self.lock:
                 error = self.last_error
@@ -724,6 +730,7 @@ class TeachServer:
                 if self.robot_mode is not None else 'no data',
                 'errors': self.errors,
                 'last_error': self.last_error,
+                'warning': self.warning,
                 'connected': self.robot_connected()[0],
                 'desk': dict(self.desk_info),
                 'measure': dict(self.measure),

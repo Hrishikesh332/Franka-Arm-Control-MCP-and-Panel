@@ -270,6 +270,14 @@ State (→ :5556, 50 Hz): `S <mode> <robot_mode> <success_rate> <O_T_EE ×16> <w
   abort with an acceleration-discontinuity reflex. libfranka directly runs at 100 % on the same
   hardware. If ROS integration is needed (RViz, MoveIt, other ROS systems), add a bridge node that
   talks to `franka_teach_rt` — don't move the control loop back.
+- **We choose the joint angles.** Sequences are replayed in **joint space**: every recorded point
+  stores the joint angles, and before anything moves the whole plan (travel + sequence) is solved with
+  our FR3 kinematics (`kinematics.py`, IK seeded with the recorded configuration — for the automatic
+  angle simply turned with the base joint) and checked against the joint ranges; straight segments are
+  split into 5 mm pieces so the arm still moves on straight lines. Unreachable means a clear message
+  and no motion. Streaming Cartesian poses and letting the robot's internal IK choose the joint motion
+  drove joints into their limits near the workspace edge. Presses, guarded moves and jogging stay
+  Cartesian.
 - **Smooth by construction.** Targets can jump (jog clicks, waypoints), so the follower plans with
   velocity/acceleration limits and passes the result through two 15 ms filters; libfranka's rate
   limiter is a second safety net. The first command of a motion equals the robot's last commanded
@@ -289,7 +297,7 @@ State (→ :5556, 50 Hz): `S <mode> <robot_mode> <success_rate> <O_T_EE ×16> <w
 | | |
 |---|---|
 | ✅ on the robot | 1 kHz link at 100 %, free drive, mode switching, Desk login and taking control, libfranka motion tests |
-| 🧪 simulation only | pick/place replay at positions, guarded moves, presses, automatic angle, *Go here*, joint-limit protection, automatic recovery |
+| 🧪 simulation only | joint-space replay of pick/place at positions, guarded moves, presses, measuring the force, automatic angle, *Go here*, homing |
 | ✅ on the robot | *Unlock & activate FCI* (Desk 5.10: take control → unlock → execution mode → FCI) |
 
 Ideas: offline joint-limit check of sequences before running them (FR3 model via pinocchio),

@@ -267,6 +267,11 @@ class TeachServer:
                 desk.open_brakes()
             except DeskError as e:
                 log.info('unlock: %s (continuing, the brakes may already be open)', e)
+            say('switching to execution mode')
+            try:
+                desk.set_operating_mode('execution')  # FCI is refused in programming mode
+            except DeskError as e:
+                log.info('execution mode: %s (continuing, it may already be active)', e)
             say('activating FCI')
             end = time.time() + 10.0  # unlocking takes a few seconds; FCI waits for it
             while True:
@@ -300,6 +305,10 @@ class TeachServer:
                 pass  # was not active
             self.desk_info['message'] = 'locking the brakes'
             desk.close_brakes()
+            try:
+                desk.set_operating_mode('programming')  # back to normal Desk use
+            except DeskError as e:
+                log.info('programming mode: %s', e)
             desk.release_control()
             self.desk = None
         self.desk_job('deactivate FCI & lock', steps)

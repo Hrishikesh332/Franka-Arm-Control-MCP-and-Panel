@@ -60,7 +60,7 @@ class Desk:
         active = (r.json() or {}).get('activeToken') or {}
         return active.get('id')
 
-    def take_control(self, on_waiting=None, wait=20.0):
+    def take_control(self, on_waiting=None, wait=30.0):
         """Request control; if someone else holds it, ask for confirmation on the Pilot."""
         # A request always succeeds, but while someone else (e.g. a Desk browser tab) holds control
         # it is only queued: we have control only once our token is the active one.
@@ -70,10 +70,11 @@ class Desk:
             return
         r = self._request('POST', '/admin/api/control-token/request?force', json={'requestedBy': self.user})
         self.token, self.token_id = r.json()['token'], r.json()['id']
-        if on_waiting:
-            on_waiting('press the circle button on the robot\'s Pilot to confirm taking control')
         end = time.time() + wait
         while time.time() < end:
+            if on_waiting:
+                on_waiting(f'someone else has control: press the circle button on the robot\'s Pilot '
+                           f'now ({end - time.time():.0f} s left)')
             if self.active_token_id() == self.token_id:
                 return
             time.sleep(0.5)
@@ -91,6 +92,10 @@ class Desk:
 
     def close_brakes(self):
         self._request('POST', '/desk/api/joints/lock')
+
+    def set_operating_mode(self, mode):
+        """'execution' (needed for FCI) or 'programming' (Desk's teaching mode)."""
+        self._request('POST', f'/desk/api/operating-mode/{mode}')
 
     def activate_fci(self):
         # Desk's app sends the control token base64 encoded (again) as a form field

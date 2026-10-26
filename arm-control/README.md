@@ -283,7 +283,7 @@ State (→ :5556, 50 Hz): `S <mode> <robot_mode> <success_rate> <O_T_EE ×16> <w
 |---|---|
 | ✅ on the robot | 1 kHz link at 100 %, free drive, mode switching, Desk login and taking control, libfranka motion tests |
 | 🧪 simulation only | pick/place replay at positions, guarded moves, presses, automatic angle, *Go here*, joint-limit protection, automatic recovery |
-| 🔧 open | *Unlock & activate FCI*: Desk 5.10 uses `/desk/api/joints/unlock` and `/control-token/fci` — call format still to be confirmed |
+| ✅ on the robot | *Unlock & activate FCI* (Desk 5.10: take control → unlock → execution mode → FCI) |
 
 Ideas: offline joint-limit check of sequences before running them (FR3 model via pinocchio),
 per-gripper TCP offset, tracking which positions hold a part, a tool-change position, importing

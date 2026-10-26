@@ -1,0 +1,27 @@
+{
+  "approved_tasks": {},
+  "authorization_basis": "User requires Franka standard Ready Home always, fully aligned; previous legacy workcell-start execution approval is retired. No new task was enabled or executed.",
+  "default_workflow": {
+    "task_id": "0_move2dest8",
+    "task_name": "chat_backward_x_from_franka_ready_v06",
+    "task_sha256": "1d6d69f9e655ded066a7d0c1ff007414801c93ef75888eff48b792ffef8fde7e"
+  },
+  "required_home": {
+    "name": "Franka standard Ready",
+    "joint_angles_deg": [
+      0,
+      -45,
+      0,
+      -135,
+      0,
+      90,
+      45
+    ],
+    "position_tolerance_m": 0.005,
+    "orientation_tolerance_deg": 1,
+    "each_joint_tolerance_deg": 1,
+    "required_at_start": true,
+    "required_at_return": true
+  },
+  "component_speed_percent": 30
+}

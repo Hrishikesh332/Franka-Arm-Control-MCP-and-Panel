@@ -1,0 +1,11 @@
+{
+  "robot_host": "192.168.5.10",
+  "certificate_sha256": "3535955bc0685ec381f1b61e09189337dbb8531709f391467a720cb50917f0e1",
+  "connection": "tunnel",
+  "timeout_seconds": 5,
+  "desk_tunnel": {
+    "bridge_host": "10.23.60.102",
+    "bridge_user": "pi",
+    "local_port": 8443
+  }
+}

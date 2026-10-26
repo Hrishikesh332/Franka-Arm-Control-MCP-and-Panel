@@ -1,0 +1,2 @@
+# Direct dependency. requirements.lock.txt pins the full tree used on the working machine.
+mcp==1.30.0

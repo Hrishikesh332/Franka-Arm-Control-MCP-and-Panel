@@ -1,0 +1,71 @@
+# ---------------------------------------------------------------------------
+# SECRETS AND CREDENTIALS — never commit these
+# ---------------------------------------------------------------------------
+# Desk login session: holds a live admin token and the control token.
+.session.json
+.session*.json
+*.session.json
+# Temp files written by write_private() before they are renamed into place.
+.franka-*
+
+# Environment files and generic secret material.
+.env
+.env.*
+!.env.example
+*.key
+*.p12
+*.pfx
+*.jks
+id_rsa*
+id_ed25519*
+*.token
+*.secret
+*.secrets
+secrets/
+credentials*
+*credentials.json
+*password*
+.netrc
+
+# Certificates and private keys, including the robot's robot-cert.pem. Local only:
+# config.json already holds the certificate hash, and setup.sh pack still includes
+# the file when you move this folder to another machine.
+*.pem
+*.crt
+*.cer
+
+# Client-specific MCP registration (Codex etc.): local to each machine.
+codex-config*.toml
+.codex/
+.mcp.json
+claude_desktop_config.json
+
+# ---------------------------------------------------------------------------
+# PER-MACHINE RUNTIME STATE
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+.cache/
+__pycache__/
+*.pyc
+# Event logs and reports written by franka_real_diagnostic_events.
+diagnostics/
+
+# ---------------------------------------------------------------------------
+# HISTORY, PACKAGING, EDITOR/OS NOISE
+# ---------------------------------------------------------------------------
+# Preserved historical workflows, tests, evidence, caches and diagnostics.
+archive/
+# Taught-workflow plans and checks. The code reads them locally (pre-start safety
+# checks, prepare_* tools), so keep them on disk, but do not publish them.
+plans/
+# One-off Tomato v2 authoring helper (imported lazily by one tool only).
+tomato_versioning.py
+# Output of `bash setup.sh pack`.
+*.zip
+*.tar.gz
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.log
